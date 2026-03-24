@@ -138,6 +138,15 @@ func (bc *BlockChain) GetUpdateStatusTrie(txs []*core.Transaction) common.Hash {
 				r_state = core.DecodeAS(r_state_enc)
 			}
 			r_state.Deposit(tx.Value)
+
+			// Justitia incentive mechanism: add rewards
+			if params.JustitiaEnabled {
+				// Add broker reward if this recipient is a broker
+				if tx.HasBroker && tx.Recipient == tx.FinalRecipient && tx.BrokerReward != nil {
+					r_state.Deposit(tx.BrokerReward)
+				}
+			}
+
 			st.Update([]byte(tx.Recipient), r_state.Encode())
 			cnt++
 		}
@@ -176,16 +185,46 @@ func (bc *BlockChain) GenerateBlock(miner int32) *core.Block {
 		ParentBlockHash: bc.CurrentBlock.Hash,
 		Number:          bc.CurrentBlock.Header.Number + 1,
 		Time:            time.Now(),
+		Miner:           miner,
 	}
+
+	// Initialize Justitia incentive fields
+	if params.JustitiaEnabled {
+		bh.BlockReward = new(big.Int).Set(params.BlockReward)
+		bh.CrossShardReward = new(big.Int)
+		bh.BrokerReward = new(big.Int)
+
+		// Calculate rewards for transactions
+		for _, tx := range txs {
+			// Check if this is a cross-shard transaction
+			if tx.HasBroker {
+				tx.IsCrossShard = true
+				// Add cross-shard reward
+				tx.CrossShardReward = new(big.Int).Set(params.CrossShardRewardRate)
+				bh.CrossShardReward.Add(bh.CrossShardReward, tx.CrossShardReward)
+
+				// Add broker reward
+				if tx.SenderIsBroker || tx.Recipient == tx.FinalRecipient {
+					tx.BrokerReward = new(big.Int).Set(params.BrokerRewardRate)
+					bh.BrokerReward.Add(bh.BrokerReward, tx.BrokerReward)
+				}
+			}
+
+			// Ensure minimum fee
+			if tx.Fee == nil || tx.Fee.Cmp(params.MinTxFee) < 0 {
+				tx.Fee = new(big.Int).Set(params.MinTxFee)
+			}
+		}
+	}
+
 	// handle transactions to build root
 	rt := bc.GetUpdateStatusTrie(txs)
 
 	bh.StateRoot = rt.Bytes()
 	bh.TxRoot = GetTxTreeRoot(txs)
 	bh.Bloom = *GetBloomFilter(txs)
-	bh.Miner = miner
-	b := core.NewBlock(bh, txs)
 
+	b := core.NewBlock(bh, txs)
 	b.Hash = b.Header.Hash()
 	return b
 }
@@ -195,6 +234,15 @@ func (bc *BlockChain) NewGenisisBlock() *core.Block {
 	body := make([]*core.Transaction, 0)
 	bh := &core.BlockHeader{
 		Number: 0,
+		Miner:  0,
+	}
+
+	// Initialize Justitia incentive fields for genesis block
+	if params.JustitiaEnabled {
+		bh.BlockReward = new(big.Int)
+		bh.CrossShardReward = new(big.Int)
+		bh.BrokerReward = new(big.Int)
+		bh.IncentiveProof = nil
 	}
 	// build a new trie database by db
 	triedb := trie.NewDatabaseWithConfig(bc.db, &trie.Config{
@@ -242,6 +290,60 @@ func (bc *BlockChain) AddBlock(b *core.Block) {
 	if err != nil {
 		rt := bc.GetUpdateStatusTrie(b.Body)
 		fmt.Println(bc.CurrentBlock.Header.Number+1, "the root = ", rt.Bytes())
+
+		// Justitia incentive mechanism: add rewards to miner
+		if params.JustitiaEnabled {
+			// Build state trie to update miner balance
+			st, err := trie.New(trie.TrieID(common.BytesToHash(rt.Bytes())), bc.triedb)
+			if err != nil {
+				log.Panic(err)
+			}
+
+			// Get miner address
+			minerAddr := utils.Int2Addr(uint64(b.Header.Miner))
+			minerStateEnc, _ := st.Get([]byte(minerAddr))
+			var minerState *core.AccountState
+			if minerStateEnc == nil {
+				// Create new account if not exists
+				minerState = &core.AccountState{
+					Nonce:   0,
+					Balance: new(big.Int),
+				}
+			} else {
+				minerState = core.DecodeAS(minerStateEnc)
+			}
+
+			// Add block reward
+			if b.Header.BlockReward != nil {
+				minerState.Deposit(b.Header.BlockReward)
+			}
+
+			// Add cross-shard transaction reward
+			if b.Header.CrossShardReward != nil {
+				minerState.Deposit(b.Header.CrossShardReward)
+			}
+
+			// Add broker reward
+			if b.Header.BrokerReward != nil {
+				minerState.Deposit(b.Header.BrokerReward)
+			}
+
+			// Update miner state
+			st.Update([]byte(minerAddr), minerState.Encode())
+
+			// Commit state changes
+			newRt, ns := st.Commit(false)
+			if ns != nil {
+				err = bc.triedb.Update(trie.NewWithNodeSet(ns))
+				if err != nil {
+					log.Panic(err)
+				}
+				err = bc.triedb.Commit(newRt, false)
+				if err != nil {
+					log.Panic(err)
+				}
+			}
+		}
 	}
 	bc.CurrentBlock = b
 	bc.Storage.AddBlock(b)

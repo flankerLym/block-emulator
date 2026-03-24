@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"math/big"
 	"time"
 
 	"github.com/bits-and-blooms/bitset"
@@ -23,6 +24,12 @@ type BlockHeader struct {
 	Number          uint64
 	Time            time.Time
 	Miner           int32
+
+	// Justitia incentive mechanism fields
+	BlockReward      *big.Int // 区块奖励
+	CrossShardReward *big.Int // 跨分片交易总奖励
+	BrokerReward     *big.Int // Broker节点总奖励
+	IncentiveProof   []byte   // 激励机制证明
 }
 
 // Encode blockHeader for storing further

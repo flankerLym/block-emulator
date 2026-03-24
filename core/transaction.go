@@ -31,6 +31,12 @@ type Transaction struct {
 	OriginalSender utils.Address
 	FinalRecipient utils.Address
 	RawTxHash      []byte
+
+	// Justitia incentive mechanism fields
+	Fee              *big.Int // 交易费用
+	IsCrossShard     bool     // 是否为跨分片交易
+	CrossShardReward *big.Int // 跨分片交易奖励
+	BrokerReward     *big.Int // Broker节点奖励
 }
 
 func (tx *Transaction) PrintTx() string {
@@ -88,5 +94,11 @@ func NewTransaction(sender, recipient string, value *big.Int, nonce uint64, prop
 	tx.RawTxHash = nil
 	tx.HasBroker = false
 	tx.SenderIsBroker = false
+
+	// Initialize Justitia incentive fields
+	tx.Fee = new(big.Int)
+	tx.IsCrossShard = false
+	tx.CrossShardReward = new(big.Int)
+	tx.BrokerReward = new(big.Int)
 	return tx
 }
