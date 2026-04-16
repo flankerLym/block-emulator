@@ -127,3 +127,23 @@ func (rthm *RelayCommitteeModule) MsgSendingControl() {
 func (rthm *RelayCommitteeModule) HandleBlockInfo(b *message.BlockInfoMsg) {
 	rthm.sl.Slog.Printf("received from shard %d in epoch %d.\n", b.SenderShardID, b.Epoch)
 }
+
+func (rthm *RelayCommitteeModule) ApplyRLAction(action RLAction) error {
+	switch action.ActionName {
+	case "", "noop":
+		rthm.sl.Slog.Println("[RL] Relay mode: noop")
+		return nil
+
+	case "enable_relay":
+		rthm.sl.Slog.Println("[RL] Relay mode: relay already enabled")
+		return nil
+
+	case "trigger_clpa", "merge_shard", "split_shard", "enable_broker", "enter_cooldown":
+		rthm.sl.Slog.Printf("[RL] Relay mode: action=%s ignored\n", action.ActionName)
+		return nil
+
+	default:
+		rthm.sl.Slog.Printf("[RL] Relay mode: unknown action=%s ignored\n", action.ActionName)
+		return nil
+	}
+}

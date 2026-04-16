@@ -44,8 +44,8 @@ type Supervisor struct {
 	// measure components
 	testMeasureMods []measure.MeasureModule
 
-	// diy, add more structures or classes here ...
-	RLActionChan chan int // 接收强化学习动作：0=不操作 1=合并 2=拆分
+	// RL actions
+	RLActionChan chan committee.RLAction
 }
 
 func (d *Supervisor) NewSupervisor(ip string, pcc *params.ChainConfig, committeeMethod string, measureModNames ...string) {
@@ -54,18 +54,29 @@ func (d *Supervisor) NewSupervisor(ip string, pcc *params.ChainConfig, committee
 	d.Ip_nodeTable = params.IPmap_nodeTable
 
 	d.sl = supervisor_log.NewSupervisorLog()
-
 	d.Ss = signal.NewStopSignal(3 * int(pcc.ShardNums))
 
 	switch committeeMethod {
 	case "CLPA_Broker":
-		d.comMod = committee.NewCLPACommitteeMod_Broker(d.Ip_nodeTable, d.Ss, d.sl, params.DatasetFile, params.TotalDataSize, params.TxBatchSize, params.ReconfigTimeGap)
+		d.comMod = committee.NewCLPACommitteeMod_Broker(
+			d.Ip_nodeTable, d.Ss, d.sl,
+			params.DatasetFile, params.TotalDataSize, params.TxBatchSize, params.ReconfigTimeGap,
+		)
 	case "CLPA":
-		d.comMod = committee.NewCLPACommitteeModule(d.Ip_nodeTable, d.Ss, d.sl, params.DatasetFile, params.TotalDataSize, params.TxBatchSize, params.ReconfigTimeGap)
+		d.comMod = committee.NewCLPACommitteeModule(
+			d.Ip_nodeTable, d.Ss, d.sl,
+			params.DatasetFile, params.TotalDataSize, params.TxBatchSize, params.ReconfigTimeGap,
+		)
 	case "Broker":
-		d.comMod = committee.NewBrokerCommitteeMod(d.Ip_nodeTable, d.Ss, d.sl, params.DatasetFile, params.TotalDataSize, params.TxBatchSize)
+		d.comMod = committee.NewBrokerCommitteeMod(
+			d.Ip_nodeTable, d.Ss, d.sl,
+			params.DatasetFile, params.TotalDataSize, params.TxBatchSize,
+		)
 	default:
-		d.comMod = committee.NewRelayCommitteeModule(d.Ip_nodeTable, d.Ss, d.sl, params.DatasetFile, params.TotalDataSize, params.TxBatchSize)
+		d.comMod = committee.NewRelayCommitteeModule(
+			d.Ip_nodeTable, d.Ss, d.sl,
+			params.DatasetFile, params.TotalDataSize, params.TxBatchSize,
+		)
 	}
 
 	d.testMeasureMods = make([]measure.MeasureModule, 0)
@@ -92,7 +103,8 @@ func (d *Supervisor) NewSupervisor(ip string, pcc *params.ChainConfig, committee
 		default:
 		}
 	}
-	d.RLActionChan = make(chan int, 2)
+
+	d.RLActionChan = make(chan committee.RLAction, 8)
 }
 
 // Supervisor received the block information from the leaders, and handle these
@@ -103,6 +115,7 @@ func (d *Supervisor) handleBlockInfos(content []byte) {
 	if err != nil {
 		log.Panic()
 	}
+
 	// StopSignal check
 	if bim.BlockBodyLength == 0 {
 		d.Ss.StopGap_Inc()
@@ -116,50 +129,30 @@ func (d *Supervisor) handleBlockInfos(content []byte) {
 	for _, measureMod := range d.testMeasureMods {
 		measureMod.UpdateMeasureRecord(bim)
 	}
-	// add codes here ...
 }
 
 // read transactions from dataFile. When the number of data is enough,
 // the Supervisor will do re-partition and send partitionMSG and txs to leaders.
-
 func (d *Supervisor) SupervisorTxHandling() {
 	go d.comMod.MsgSendingControl()
 
-	//强化学习动作循环
 	for !d.Ss.GapEnough() {
-
 		select {
 		case action := <-d.RLActionChan:
-			fmt.Println("收到 RL 动作：", action)
-
-			// 👇 👇 👇 【在这里修改了！】真正的合并 / 拆分
-			clpaMod := d.comMod.(*committee.CLPACommitteeModule)
-			switch action {
-			case 1:
-				// ✅ 合并：执行 1 次 CLPA → 账户聚集
-				d.sl.Slog.Println("👉 RL 动作：合并分片（聚集紧密账户）")
-				clpaMod.DoRePartition()
-
-			case 2:
-				// ✅ 拆分：执行 2 次 CLPA → 打散大社区 → 负载均衡
-				d.sl.Slog.Println("👉 RL 动作：拆分分片（均衡负载，分散账户）")
-				clpaMod.DoRePartition()
-				clpaMod.DoRePartition()
-
-			case 0:
-				fmt.Println("👉 不操作")
+			d.sl.Slog.Printf("[RL] receive action: %+v\n", action)
+			if err := d.comMod.ApplyRLAction(action); err != nil {
+				d.sl.Slog.Printf("[RL] ApplyRLAction failed: %v\n", err)
 			}
-
 		default:
+			time.Sleep(200 * time.Millisecond)
 		}
-
-		time.Sleep(200 * time.Millisecond)
 	}
-	d.comMod.MsgSendingControl()
+
 	// TxHandling is end
 	for !d.Ss.GapEnough() { // wait all txs to be handled
 		time.Sleep(time.Second)
 	}
+
 	// send stop message
 	stopmsg := message.MergeMessage(message.CStop, []byte("this is a stop message~"))
 	d.sl.Slog.Println("Supervisor: now sending cstop message to all nodes")
@@ -168,6 +161,7 @@ func (d *Supervisor) SupervisorTxHandling() {
 			networks.TcpDial(stopmsg, d.Ip_nodeTable[sid][nid])
 		}
 	}
+
 	// make sure all stop messages are sent.
 	time.Sleep(time.Duration(params.Delay+params.JitterRange+3) * time.Millisecond)
 
@@ -182,7 +176,6 @@ func (d *Supervisor) handleMessage(msg []byte) {
 	switch msgType {
 	case message.CBlockInfo:
 		d.handleBlockInfos(content)
-		// add codes for more functionality
 	default:
 		d.comMod.HandleOtherMessage(msg)
 		for _, mm := range d.testMeasureMods {
@@ -239,25 +232,114 @@ func (d *Supervisor) CloseSupervisor() {
 	d.tcpLn.Close()
 }
 
+type rlActionRequest struct {
+	// 旧版 Python: {"action": 0/1/2}
+	Action *int `json:"action"`
+
+	// 新版 Python: {"action_id":..., "action_name":..., "shard_id":..., "params":...}
+	ActionID   *int                   `json:"action_id"`
+	ActionName string                 `json:"action_name"`
+	ShardID    int                    `json:"shard_id"`
+	Params     map[string]interface{} `json:"params"`
+}
+
+func normalizeRLAction(req rlActionRequest) committee.RLAction {
+	act := committee.RLAction{
+		ActionID:   0,
+		ActionName: "noop",
+		ShardID:    req.ShardID,
+		Params:     req.Params,
+	}
+
+	// 优先使用新版 action_name
+	if req.ActionName != "" {
+		act.ActionName = req.ActionName
+		if req.ActionID != nil {
+			act.ActionID = *req.ActionID
+		}
+		return act
+	}
+
+	// 兼容旧版 {"action": x}
+	if req.Action != nil {
+		switch *req.Action {
+		case 0:
+			act.ActionID = 0
+			act.ActionName = "noop"
+		case 1:
+			// 兼容你当前旧 Python 语义：1=合并
+			act.ActionID = 1
+			act.ActionName = "merge_shard"
+		case 2:
+			// 兼容你当前旧 Python 语义：2=拆分
+			act.ActionID = 2
+			act.ActionName = "split_shard"
+		default:
+			act.ActionID = *req.Action
+			act.ActionName = "noop"
+		}
+		return act
+	}
+
+	// 兜底：只有 action_id，没有 action_name
+	if req.ActionID != nil {
+		act.ActionID = *req.ActionID
+		switch *req.ActionID {
+		case 0:
+			act.ActionName = "noop"
+		case 1:
+			act.ActionName = "split_shard"
+		case 2:
+			act.ActionName = "merge_shard"
+		case 3:
+			act.ActionName = "trigger_clpa"
+		case 4:
+			act.ActionName = "enable_broker"
+		case 5:
+			act.ActionName = "enable_relay"
+		case 6:
+			act.ActionName = "enter_cooldown"
+		default:
+			act.ActionName = "noop"
+		}
+	}
+
+	return act
+}
+
 // 强化学习动作接收服务
 func (d *Supervisor) StartRLActionServer() {
-	http.HandleFunc("/rl_action", func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Action int `json:"action"`
-		}
-		json.NewDecoder(r.Body).Decode(&req)
+	mux := http.NewServeMux()
 
-		// 把动作传给仿真主线程
+	mux.HandleFunc("/rl_action", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req rlActionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"status":"bad_request"}`))
+			return
+		}
+
+		act := normalizeRLAction(req)
+
 		select {
-		case d.RLActionChan <- req.Action:
+		case d.RLActionChan <- act:
 		default:
+			d.sl.Slog.Println("[RL] action channel full, drop action")
 		}
 
-		w.Write([]byte(`{"status":"ok"}`))
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 
 	go func() {
-		http.ListenAndServe(":9000", nil)
+		if err := http.ListenAndServe(":9000", mux); err != nil {
+			d.sl.Slog.Printf("[RL] action server stopped: %v\n", err)
+		}
 	}()
+
 	fmt.Println("✅ RL 动作服务已启动：:9000")
 }

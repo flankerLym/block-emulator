@@ -251,3 +251,37 @@ func (ccm *CLPACommitteeModule) DoRePartition() {
 
 	ccm.sl.Slog.Println("[RL 触发] 重分片完成！")
 }
+
+func (ccm *CLPACommitteeModule) ApplyRLAction(action RLAction) error {
+	switch action.ActionName {
+	case "", "noop":
+		ccm.sl.Slog.Println("[RL] CLPA mode: noop")
+		return nil
+
+	case "trigger_clpa":
+		ccm.sl.Slog.Println("[RL] CLPA mode: trigger_clpa")
+		ccm.DoRePartition()
+		return nil
+
+	case "merge_shard":
+		// 当前阶段先保持和你旧逻辑兼容：merge = 1 次 CLPA
+		ccm.sl.Slog.Println("[RL] CLPA mode: merge_shard -> compat = run CLPA once")
+		ccm.DoRePartition()
+		return nil
+
+	case "split_shard":
+		// 当前阶段先保持和你旧逻辑兼容：split = 2 次 CLPA
+		ccm.sl.Slog.Println("[RL] CLPA mode: split_shard -> compat = run CLPA twice")
+		ccm.DoRePartition()
+		ccm.DoRePartition()
+		return nil
+
+	case "enable_broker", "enable_relay", "enter_cooldown":
+		ccm.sl.Slog.Printf("[RL] CLPA mode: action=%s ignored\n", action.ActionName)
+		return nil
+
+	default:
+		ccm.sl.Slog.Printf("[RL] CLPA mode: unknown action=%s ignored\n", action.ActionName)
+		return nil
+	}
+}

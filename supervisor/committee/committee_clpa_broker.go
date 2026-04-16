@@ -449,3 +449,58 @@ func (ccm *CLPACommitteeMod_Broker) handleTx2ConfirmMag(mag2confirms []*message.
 	ccm.brokerModuleLock.Unlock()
 	fmt.Println("finish ctx with adding tx1 and tx2 to txpool,len", num)
 }
+
+func (ccm *CLPACommitteeMod_Broker) DoRePartition() {
+	ccm.clpaLock.Lock()
+	defer ccm.clpaLock.Unlock()
+
+	ccm.sl.Slog.Println("[RL trigger] CLPA_Broker is executing repartition...")
+
+	mmap, _ := ccm.clpaGraph.CLPA_Partition()
+
+	ccm.clpaMapSend(mmap)
+
+	for key, val := range mmap {
+		ccm.modifiedMap[key] = val
+	}
+
+	ccm.clpaReset()
+
+	ccm.sl.Slog.Println("[RL trigger] CLPA_Broker repartition done")
+}
+
+func (ccm *CLPACommitteeMod_Broker) ApplyRLAction(action RLAction) error {
+	switch action.ActionName {
+	case "", "noop":
+		ccm.sl.Slog.Println("[RL] CLPA_Broker mode: noop")
+		return nil
+
+	case "trigger_clpa":
+		ccm.sl.Slog.Println("[RL] CLPA_Broker mode: trigger_clpa")
+		ccm.DoRePartition()
+		return nil
+
+	case "merge_shard":
+		ccm.sl.Slog.Println("[RL] CLPA_Broker mode: merge_shard -> compat = run CLPA once")
+		ccm.DoRePartition()
+		return nil
+
+	case "split_shard":
+		ccm.sl.Slog.Println("[RL] CLPA_Broker mode: split_shard -> compat = run CLPA twice")
+		ccm.DoRePartition()
+		ccm.DoRePartition()
+		return nil
+
+	case "enable_broker":
+		ccm.sl.Slog.Println("[RL] CLPA_Broker mode: broker already enabled")
+		return nil
+
+	case "enable_relay", "enter_cooldown":
+		ccm.sl.Slog.Printf("[RL] CLPA_Broker mode: action=%s ignored\n", action.ActionName)
+		return nil
+
+	default:
+		ccm.sl.Slog.Printf("[RL] CLPA_Broker mode: unknown action=%s ignored\n", action.ActionName)
+		return nil
+	}
+}

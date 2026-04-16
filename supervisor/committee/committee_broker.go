@@ -321,3 +321,23 @@ func (bcm *BrokerCommitteeMod) handleTx2ConfirmMag(mag2confirms []*message.Mag2C
 	bcm.brokerModuleLock.Unlock()
 	fmt.Println("finish ctx with adding tx1 and tx2 to txpool,len", num)
 }
+
+func (bcm *BrokerCommitteeMod) ApplyRLAction(action RLAction) error {
+	switch action.ActionName {
+	case "", "noop":
+		bcm.sl.Slog.Println("[RL] Broker mode: noop")
+		return nil
+
+	case "enable_broker":
+		bcm.sl.Slog.Println("[RL] Broker mode: broker already enabled")
+		return nil
+
+	case "trigger_clpa", "merge_shard", "split_shard", "enable_relay", "enter_cooldown":
+		bcm.sl.Slog.Printf("[RL] Broker mode: action=%s ignored\n", action.ActionName)
+		return nil
+
+	default:
+		bcm.sl.Slog.Printf("[RL] Broker mode: unknown action=%s ignored\n", action.ActionName)
+		return nil
+	}
+}
