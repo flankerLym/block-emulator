@@ -13,9 +13,11 @@ import (
 	"blockEmulator/supervisor/supervisor_log"
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"sync"
 	"time"
 )
@@ -43,6 +45,7 @@ type Supervisor struct {
 	testMeasureMods []measure.MeasureModule
 
 	// diy, add more structures or classes here ...
+	RLActionChan chan int // 接收强化学习动作：0=不操作 1=合并 2=拆分
 }
 
 func (d *Supervisor) NewSupervisor(ip string, pcc *params.ChainConfig, committeeMethod string, measureModNames ...string) {
@@ -89,6 +92,7 @@ func (d *Supervisor) NewSupervisor(ip string, pcc *params.ChainConfig, committee
 		default:
 		}
 	}
+	d.RLActionChan = make(chan int, 2)
 }
 
 // Supervisor received the block information from the leaders, and handle these
@@ -117,7 +121,40 @@ func (d *Supervisor) handleBlockInfos(content []byte) {
 
 // read transactions from dataFile. When the number of data is enough,
 // the Supervisor will do re-partition and send partitionMSG and txs to leaders.
+
 func (d *Supervisor) SupervisorTxHandling() {
+	go d.comMod.MsgSendingControl()
+
+	//强化学习动作循环
+	for !d.Ss.GapEnough() {
+
+		select {
+		case action := <-d.RLActionChan:
+			fmt.Println("收到 RL 动作：", action)
+
+			// 👇 👇 👇 【在这里修改了！】真正的合并 / 拆分
+			clpaMod := d.comMod.(*committee.CLPACommitteeModule)
+			switch action {
+			case 1:
+				// ✅ 合并：执行 1 次 CLPA → 账户聚集
+				d.sl.Slog.Println("👉 RL 动作：合并分片（聚集紧密账户）")
+				clpaMod.DoRePartition()
+
+			case 2:
+				// ✅ 拆分：执行 2 次 CLPA → 打散大社区 → 负载均衡
+				d.sl.Slog.Println("👉 RL 动作：拆分分片（均衡负载，分散账户）")
+				clpaMod.DoRePartition()
+				clpaMod.DoRePartition()
+
+			case 0:
+				fmt.Println("👉 不操作")
+			}
+
+		default:
+		}
+
+		time.Sleep(200 * time.Millisecond)
+	}
 	d.comMod.MsgSendingControl()
 	// TxHandling is end
 	for !d.Ss.GapEnough() { // wait all txs to be handled
@@ -180,6 +217,7 @@ func (d *Supervisor) TcpListen() {
 		log.Panic(err)
 	}
 	d.tcpLn = ln
+	d.StartRLActionServer()
 	for {
 		conn, err := d.tcpLn.Accept()
 		if err != nil {
@@ -199,4 +237,27 @@ func (d *Supervisor) CloseSupervisor() {
 	}
 	networks.CloseAllConnInPool()
 	d.tcpLn.Close()
+}
+
+// 强化学习动作接收服务
+func (d *Supervisor) StartRLActionServer() {
+	http.HandleFunc("/rl_action", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Action int `json:"action"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+
+		// 把动作传给仿真主线程
+		select {
+		case d.RLActionChan <- req.Action:
+		default:
+		}
+
+		w.Write([]byte(`{"status":"ok"}`))
+	})
+
+	go func() {
+		http.ListenAndServe(":9000", nil)
+	}()
+	fmt.Println("✅ RL 动作服务已启动：:9000")
 }

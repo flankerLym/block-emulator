@@ -216,6 +216,7 @@ func (ccm *CLPACommitteeModule) HandleBlockInfo(b *message.BlockInfoMsg) {
 	if atomic.CompareAndSwapInt32(&ccm.curEpoch, int32(b.Epoch-1), int32(b.Epoch)) {
 		ccm.sl.Slog.Println("this curEpoch is updated", b.Epoch)
 	}
+
 	if b.BlockBodyLength == 0 {
 		return
 	}
@@ -227,4 +228,26 @@ func (ccm *CLPACommitteeModule) HandleBlockInfo(b *message.BlockInfoMsg) {
 		ccm.clpaGraph.AddEdge(partition.Vertex{Addr: r2tx.Sender}, partition.Vertex{Addr: r2tx.Recipient})
 	}
 	ccm.clpaLock.Unlock()
+}
+func (ccm *CLPACommitteeModule) DoRePartition() {
+	ccm.clpaLock.Lock()
+	defer ccm.clpaLock.Unlock()
+
+	ccm.sl.Slog.Println("[RL 触发] 正在执行 CLPA 账户重分片...")
+
+	// 🔥 真正的重分片计算
+	mmap, _ := ccm.clpaGraph.CLPA_Partition()
+
+	// 发送新的分片表给所有节点
+	ccm.clpaMapSend(mmap)
+
+	// 更新本地映射
+	for key, val := range mmap {
+		ccm.modifiedMap[key] = val
+	}
+
+	// 重置 CLPA 图
+	ccm.clpaReset()
+
+	ccm.sl.Slog.Println("[RL 触发] 重分片完成！")
 }
