@@ -45,7 +45,8 @@ type Supervisor struct {
 	testMeasureMods []measure.MeasureModule
 
 	// RL actions
-	RLActionChan chan committee.RLAction
+	RLActionChan   chan committee.RLAction
+	lastRLActionAt time.Time
 }
 
 func (d *Supervisor) NewSupervisor(ip string, pcc *params.ChainConfig, committeeMethod string, measureModNames ...string) {
