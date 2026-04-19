@@ -7,7 +7,6 @@ import (
 	"blockEmulator/message"
 	"blockEmulator/networks"
 	"blockEmulator/params"
-	"blockEmulator/partition/reshard"
 	"blockEmulator/supervisor/committee"
 	"blockEmulator/supervisor/measure"
 	"blockEmulator/supervisor/signal"
@@ -43,23 +42,13 @@ type Supervisor struct {
 	// measure components
 	testMeasureMods []measure.MeasureModule
 
-	// reshard components
-	ReshardCfg reshard.ReshardConfig
-	Strategy   reshard.Strategy
-	Verifier   reshard.Verifier
-
 	// diy, add more structures or classes here ...
 }
 
-func (d *Supervisor) NewSupervisor(ip string, pcc *params.ChainConfig, committeeMethod string, reshardCfg reshard.ReshardConfig, strategy reshard.Strategy, verifier reshard.Verifier, measureModNames ...string) {
+func (d *Supervisor) NewSupervisor(ip string, pcc *params.ChainConfig, committeeMethod string, measureModNames ...string) {
 	d.IPaddr = ip
 	d.ChainConfig = pcc
 	d.Ip_nodeTable = params.IPmap_nodeTable
-
-	// reshard components
-	d.ReshardCfg = reshardCfg
-	d.Strategy = strategy
-	d.Verifier = verifier
 
 	d.sl = supervisor_log.NewSupervisorLog()
 
@@ -67,13 +56,13 @@ func (d *Supervisor) NewSupervisor(ip string, pcc *params.ChainConfig, committee
 
 	switch committeeMethod {
 	case "CLPA_Broker":
-		d.comMod = committee.NewCLPACommitteeMod_Broker(d.Ip_nodeTable, d.Ss, d.sl, params.DatasetFile, params.TotalDataSize, params.TxBatchSize, params.ReconfigTimeGap, d.ReshardCfg, d.Strategy, d.Verifier)
+		d.comMod = committee.NewCLPACommitteeMod_Broker(d.Ip_nodeTable, d.Ss, d.sl, params.DatasetFile, params.TotalDataSize, params.TxBatchSize, params.ReconfigTimeGap)
 	case "CLPA":
-		d.comMod = committee.NewCLPACommitteeModule(d.Ip_nodeTable, d.Ss, d.sl, params.DatasetFile, params.TotalDataSize, params.TxBatchSize, params.ReconfigTimeGap, d.ReshardCfg, d.Strategy, d.Verifier)
+		d.comMod = committee.NewCLPACommitteeModule(d.Ip_nodeTable, d.Ss, d.sl, params.DatasetFile, params.TotalDataSize, params.TxBatchSize, params.ReconfigTimeGap)
 	case "Broker":
-		d.comMod = committee.NewBrokerCommitteeMod(d.Ip_nodeTable, d.Ss, d.sl, params.DatasetFile, params.TotalDataSize, params.TxBatchSize, d.ReshardCfg, d.Strategy, d.Verifier)
+		d.comMod = committee.NewBrokerCommitteeMod(d.Ip_nodeTable, d.Ss, d.sl, params.DatasetFile, params.TotalDataSize, params.TxBatchSize)
 	default:
-		d.comMod = committee.NewRelayCommitteeModule(d.Ip_nodeTable, d.Ss, d.sl, params.DatasetFile, params.TotalDataSize, params.TxBatchSize, d.ReshardCfg, d.Strategy, d.Verifier)
+		d.comMod = committee.NewRelayCommitteeModule(d.Ip_nodeTable, d.Ss, d.sl, params.DatasetFile, params.TotalDataSize, params.TxBatchSize)
 	}
 
 	d.testMeasureMods = make([]measure.MeasureModule, 0)

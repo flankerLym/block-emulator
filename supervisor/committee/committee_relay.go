@@ -5,7 +5,6 @@ import (
 	"blockEmulator/message"
 	"blockEmulator/networks"
 	"blockEmulator/params"
-	"blockEmulator/partition/reshard"
 	"blockEmulator/supervisor/signal"
 	"blockEmulator/supervisor/supervisor_log"
 	"blockEmulator/utils"
@@ -26,14 +25,9 @@ type RelayCommitteeModule struct {
 	IpNodeTable  map[uint64]map[uint64]string
 	sl           *supervisor_log.SupervisorLog
 	Ss           *signal.StopSignal // to control the stop message sending
-
-	// reshard components
-	ReshardCfg reshard.ReshardConfig
-	Strategy   reshard.Strategy
-	Verifier   reshard.Verifier
 }
 
-func NewRelayCommitteeModule(Ip_nodeTable map[uint64]map[uint64]string, Ss *signal.StopSignal, slog *supervisor_log.SupervisorLog, csvFilePath string, dataNum, batchNum int, reshardCfg reshard.ReshardConfig, strategy reshard.Strategy, verifier reshard.Verifier) *RelayCommitteeModule {
+func NewRelayCommitteeModule(Ip_nodeTable map[uint64]map[uint64]string, Ss *signal.StopSignal, slog *supervisor_log.SupervisorLog, csvFilePath string, dataNum, batchNum int) *RelayCommitteeModule {
 	return &RelayCommitteeModule{
 		csvPath:      csvFilePath,
 		dataTotalNum: dataNum,
@@ -42,9 +36,6 @@ func NewRelayCommitteeModule(Ip_nodeTable map[uint64]map[uint64]string, Ss *sign
 		IpNodeTable:  Ip_nodeTable,
 		Ss:           Ss,
 		sl:           slog,
-		ReshardCfg:   reshardCfg,
-		Strategy:     strategy,
-		Verifier:     verifier,
 	}
 }
 

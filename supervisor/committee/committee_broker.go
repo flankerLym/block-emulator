@@ -6,7 +6,6 @@ import (
 	"blockEmulator/message"
 	"blockEmulator/networks"
 	"blockEmulator/params"
-	"blockEmulator/partition/reshard"
 	"blockEmulator/supervisor/signal"
 	"blockEmulator/supervisor/supervisor_log"
 	"blockEmulator/utils"
@@ -41,14 +40,9 @@ type BrokerCommitteeMod struct {
 	// control components
 	Ss          *signal.StopSignal // to control the stop message sending
 	IpNodeTable map[uint64]map[uint64]string
-
-	// reshard components
-	ReshardCfg reshard.ReshardConfig
-	Strategy   reshard.Strategy
-	Verifier   reshard.Verifier
 }
 
-func NewBrokerCommitteeMod(Ip_nodeTable map[uint64]map[uint64]string, Ss *signal.StopSignal, sl *supervisor_log.SupervisorLog, csvFilePath string, dataNum, batchNum int, reshardCfg reshard.ReshardConfig, strategy reshard.Strategy, verifier reshard.Verifier) *BrokerCommitteeMod {
+func NewBrokerCommitteeMod(Ip_nodeTable map[uint64]map[uint64]string, Ss *signal.StopSignal, sl *supervisor_log.SupervisorLog, csvFilePath string, dataNum, batchNum int) *BrokerCommitteeMod {
 
 	broker := new(broker.Broker)
 	broker.NewBroker(nil)
@@ -65,9 +59,6 @@ func NewBrokerCommitteeMod(Ip_nodeTable map[uint64]map[uint64]string, Ss *signal
 		IpNodeTable:        Ip_nodeTable,
 		Ss:                 Ss,
 		sl:                 sl,
-		ReshardCfg:         reshardCfg,
-		Strategy:           strategy,
-		Verifier:           verifier,
 	}
 
 }

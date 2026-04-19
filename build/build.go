@@ -4,7 +4,6 @@ import (
 	"blockEmulator/consensus_shard/pbft_all"
 	"blockEmulator/networks"
 	"blockEmulator/params"
-	"blockEmulator/partition/reshard"
 	"blockEmulator/supervisor"
 	"log"
 	"time"
@@ -45,7 +44,7 @@ func initConfig(nid, nnm, sid, snm uint64) *params.ChainConfig {
 	return pcc
 }
 
-func BuildSupervisor(nnm, snm uint64, reshardCfg reshard.ReshardConfig, strategy reshard.Strategy, verifier reshard.Verifier) {
+func BuildSupervisor(nnm, snm uint64) {
 	methodID := params.ConsensusMethod
 	var measureMod []string
 	if methodID == 0 || methodID == 2 {
@@ -56,7 +55,7 @@ func BuildSupervisor(nnm, snm uint64, reshardCfg reshard.ReshardConfig, strategy
 	measureMod = append(measureMod, "Tx_Details")
 
 	lsn := new(supervisor.Supervisor)
-	lsn.NewSupervisor(params.SupervisorAddr, initConfig(123, nnm, 123, snm), params.CommitteeMethod[methodID], reshardCfg, strategy, verifier, measureMod...)
+	lsn.NewSupervisor(params.SupervisorAddr, initConfig(123, nnm, 123, snm), params.CommitteeMethod[methodID], measureMod...)
 	go lsn.TcpListen()
 	time.Sleep(5000 * time.Millisecond)
 	lsn.SupervisorTxHandling()

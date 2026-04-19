@@ -7,7 +7,6 @@ import (
 	"blockEmulator/networks"
 	"blockEmulator/params"
 	"blockEmulator/partition"
-	"blockEmulator/partition/reshard"
 	"blockEmulator/supervisor/signal"
 	"blockEmulator/supervisor/supervisor_log"
 	"blockEmulator/utils"
@@ -51,14 +50,9 @@ type CLPACommitteeMod_Broker struct {
 	// control components
 	Ss          *signal.StopSignal // to control the stop message sending
 	IpNodeTable map[uint64]map[uint64]string
-
-	// reshard components
-	ReshardCfg reshard.ReshardConfig
-	Strategy   reshard.Strategy
-	Verifier   reshard.Verifier
 }
 
-func NewCLPACommitteeMod_Broker(Ip_nodeTable map[uint64]map[uint64]string, Ss *signal.StopSignal, sl *supervisor_log.SupervisorLog, csvFilePath string, dataNum, batchNum, clpaFrequency int, reshardCfg reshard.ReshardConfig, strategy reshard.Strategy, verifier reshard.Verifier) *CLPACommitteeMod_Broker {
+func NewCLPACommitteeMod_Broker(Ip_nodeTable map[uint64]map[uint64]string, Ss *signal.StopSignal, sl *supervisor_log.SupervisorLog, csvFilePath string, dataNum, batchNum, clpaFrequency int) *CLPACommitteeMod_Broker {
 	cg := new(partition.CLPAState)
 	cg.Init_CLPAState(0.5, 100, params.ShardNum)
 
@@ -82,9 +76,6 @@ func NewCLPACommitteeMod_Broker(Ip_nodeTable map[uint64]map[uint64]string, Ss *s
 		Ss:                  Ss,
 		sl:                  sl,
 		curEpoch:            0,
-		ReshardCfg:          reshardCfg,
-		Strategy:            strategy,
-		Verifier:            verifier,
 	}
 }
 

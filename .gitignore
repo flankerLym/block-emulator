@@ -5,5 +5,5 @@ expTest
 # 不要上传可执行文件！
 # Do not upload your executable files!
 *.exe
-updatePlan
+
 selectedTxs_300K.csv
