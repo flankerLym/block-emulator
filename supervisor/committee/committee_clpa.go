@@ -6,6 +6,7 @@ import (
 	"blockEmulator/networks"
 	"blockEmulator/params"
 	"blockEmulator/partition"
+	"blockEmulator/partition/reshard"
 	"blockEmulator/supervisor/signal"
 	"blockEmulator/supervisor/supervisor_log"
 	"blockEmulator/utils"
@@ -40,9 +41,14 @@ type CLPACommitteeModule struct {
 	// control components
 	Ss          *signal.StopSignal // to control the stop message sending
 	IpNodeTable map[uint64]map[uint64]string
+
+	// reshard components
+	ReshardCfg reshard.ReshardConfig
+	Strategy   reshard.Strategy
+	Verifier   reshard.Verifier
 }
 
-func NewCLPACommitteeModule(Ip_nodeTable map[uint64]map[uint64]string, Ss *signal.StopSignal, sl *supervisor_log.SupervisorLog, csvFilePath string, dataNum, batchNum, clpaFrequency int) *CLPACommitteeModule {
+func NewCLPACommitteeModule(Ip_nodeTable map[uint64]map[uint64]string, Ss *signal.StopSignal, sl *supervisor_log.SupervisorLog, csvFilePath string, dataNum, batchNum, clpaFrequency int, reshardCfg reshard.ReshardConfig, strategy reshard.Strategy, verifier reshard.Verifier) *CLPACommitteeModule {
 	cg := new(partition.CLPAState)
 	cg.Init_CLPAState(0.5, 100, params.ShardNum)
 	return &CLPACommitteeModule{
@@ -58,6 +64,9 @@ func NewCLPACommitteeModule(Ip_nodeTable map[uint64]map[uint64]string, Ss *signa
 		Ss:                  Ss,
 		sl:                  sl,
 		curEpoch:            0,
+		ReshardCfg:          reshardCfg,
+		Strategy:            strategy,
+		Verifier:            verifier,
 	}
 }
 
@@ -142,13 +151,39 @@ func (ccm *CLPACommitteeModule) MsgSendingControl() {
 		if params.ShardNum > 1 && !ccm.clpaLastRunningTime.IsZero() && time.Since(ccm.clpaLastRunningTime) >= time.Duration(ccm.clpaFreq)*time.Second {
 			ccm.clpaLock.Lock()
 			clpaCnt++
-			mmap, _ := ccm.clpaGraph.CLPA_Partition()
 
-			ccm.clpaMapSend(mmap)
-			for key, val := range mmap {
-				ccm.modifiedMap[key] = val
+			if ccm.ReshardCfg.Enabled {
+				// 使用新的重分片策略
+				snapshot := ccm.buildSystemSnapshot()
+				plan := ccm.Strategy.BuildPlan(snapshot, ccm.ReshardCfg)
+
+				if plan.Triggered {
+					ok := ccm.Verifier.Verify(snapshot, &plan, ccm.ReshardCfg)
+					if ok {
+						ccm.applyReshardPlan(plan)
+					} else {
+						ccm.sl.Slog.Printf("[Reshard] verification failed: %s", plan.VerificationMsg)
+					}
+				} else {
+					ccm.sl.Slog.Printf("[Reshard] not triggered: %s", plan.Reason)
+					// 如果重分片未触发，使用原来的CLPA逻辑
+					mmap, _ := ccm.clpaGraph.CLPA_Partition()
+					ccm.clpaMapSend(mmap)
+					for key, val := range mmap {
+						ccm.modifiedMap[key] = val
+					}
+					ccm.clpaReset()
+				}
+			} else {
+				// 使用原来的CLPA逻辑
+				mmap, _ := ccm.clpaGraph.CLPA_Partition()
+				ccm.clpaMapSend(mmap)
+				for key, val := range mmap {
+					ccm.modifiedMap[key] = val
+				}
+				ccm.clpaReset()
 			}
-			ccm.clpaReset()
+
 			ccm.clpaLock.Unlock()
 
 			for atomic.LoadInt32(&ccm.curEpoch) != int32(clpaCnt) {
@@ -209,6 +244,57 @@ func (ccm *CLPACommitteeModule) clpaReset() {
 	for key, val := range ccm.modifiedMap {
 		ccm.clpaGraph.PartitionMap[partition.Vertex{Addr: key}] = int(val)
 	}
+}
+
+func (ccm *CLPACommitteeModule) buildSystemSnapshot() reshard.SystemSnapshot {
+	var shardMetrics []reshard.ShardMetrics
+	for i := 0; i < params.ShardNum; i++ {
+		shardMetrics = append(shardMetrics, reshard.ShardMetrics{
+			ShardID:        uint64(i),
+			Load:           1.0, // 简化处理，实际应根据真实负载计算
+			QueueLen:       0,
+			CrossTxRate:    0.5, // 简化处理
+			HotspotScore:   0.3, // 简化处理
+			RiskScore:      0.2, // 简化处理
+			LatencyScore:   0.1, // 简化处理
+			LastUpdateUnix: time.Now().Unix(),
+		})
+	}
+
+	var accounts []reshard.AccountStat
+	for key, val := range ccm.modifiedMap {
+		accounts = append(accounts, reshard.AccountStat{
+			Account:           key,
+			CurrentShard:      val,
+			TxFreq:            1.0, // 简化处理
+			TxVolume:          1.0, // 简化处理
+			RecentActivity:    1.0, // 简化处理
+			CrossContribution: 0.5, // 简化处理
+			Degree:            2.0, // 简化处理
+			Burst:             1.0, // 简化处理
+			RiskScore:         0.2, // 简化处理
+			MigrationCost:     0.1, // 简化处理
+		})
+	}
+
+	return reshard.SystemSnapshot{
+		Now:          time.Now(),
+		ShardMetrics: shardMetrics,
+		Accounts:     accounts,
+		ShardCount:   params.ShardNum,
+	}
+}
+
+func (ccm *CLPACommitteeModule) applyReshardPlan(plan reshard.ReshardPlan) {
+	mmap := make(map[string]uint64)
+	for _, mv := range plan.SelectedMoves {
+		mmap[mv.Account] = mv.ToShard
+		ccm.modifiedMap[mv.Account] = mv.ToShard
+	}
+	ccm.clpaMapSend(mmap)
+	ccm.clpaReset()
+	ccm.sl.Slog.Printf("[Reshard] applied moves=%d verifier=%s verify_ok=%v msg=%s",
+		len(plan.SelectedMoves), plan.VerifierMode, plan.VerificationOK, plan.VerificationMsg)
 }
 
 func (ccm *CLPACommitteeModule) HandleBlockInfo(b *message.BlockInfoMsg) {

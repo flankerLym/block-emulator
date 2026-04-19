@@ -3,6 +3,7 @@ package main
 import (
 	"blockEmulator/build"
 	"blockEmulator/params"
+	"blockEmulator/partition/reshard"
 	"fmt"
 	"log"
 
@@ -27,6 +28,21 @@ var (
 func main() {
 	// Read basic configs
 	params.ReadConfigFile()
+
+	// Load reshard config
+	reshardCfg, err := params.LoadReshardConfigFromJSON("./paramsConfig.json")
+	if err != nil {
+		log.Fatalf("load reshard config failed: %v", err)
+	}
+
+	strategy, err := reshard.BuildStrategy(reshardCfg)
+	if err != nil {
+		log.Fatalf("build reshard strategy failed: %v", err)
+	}
+	verifier := reshard.BuildVerifier(reshardCfg)
+
+	log.Printf("[Reshard] strategy=%s verifier=%s enabled=%v",
+		strategy.Name(), verifier.Name(), reshardCfg.Enabled)
 
 	// Generate bat files
 	pflag.BoolVarP(&isGen, "gen", "g", false, "isGen is a bool value, which indicates whether to generate a batch file")
@@ -60,7 +76,7 @@ func main() {
 	}
 
 	if isSupervisor {
-		build.BuildSupervisor(uint64(nodeNum), uint64(shardNum))
+		build.BuildSupervisor(uint64(nodeNum), uint64(shardNum), reshardCfg, strategy, verifier)
 	} else {
 		if shardID >= shardNum || shardID < 0 {
 			log.Panicf("Wrong ShardID. This ShardID is %d, but only %d shards in the current config. ", shardID, shardNum)
