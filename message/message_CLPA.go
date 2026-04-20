@@ -8,12 +8,11 @@ import (
 )
 
 var (
-	AccountState_and_TX        MessageType = "AccountState&txs"
-	PartitionReq               RequestType = "PartitionReq"
-	CPartitionMsg              MessageType = "PartitionModifiedMap"
-	CPartitionReady            MessageType = "ready for partition"
-	CAccountTransferMsg_broker MessageType = "AccountTransfer&txs_broker"
-	CInner2CrossTx             MessageType = "Inner2CrossTx"
+	AccountState_and_TX MessageType = "AccountState&txs"
+	PartitionReq        RequestType = "PartitionReq"
+
+	CPartitionMsg   MessageType = "PartitionModifiedMap"
+	CPartitionReady MessageType = "ready for partition"
 )
 
 type ShadowCapsule struct {
@@ -23,15 +22,13 @@ type ShadowCapsule struct {
 	Degree       int
 	Hotness      float64
 	LocalityGain float64
-
-	Balance     string
-	Nonce       uint64
-	CodeHash    []byte
-	StorageRoot []byte
-	DebtRoot    []byte
-
-	EpochTag uint64
-	RVCID    string
+	Balance      string
+	Nonce        uint64
+	CodeHash     []byte
+	StorageRoot  []byte
+	DebtRoot     []byte
+	EpochTag     uint64
+	RVCID        string
 }
 
 type ReshardingValidityCertificate struct {
@@ -65,20 +62,17 @@ type PartitionModifiedMap struct {
 }
 
 type AccountTransferMsg struct {
-	ModifiedMap  map[string]uint64
-	Addrs        []string
-	AccountState []*core.AccountState
-
+	ModifiedMap    map[string]uint64
+	Addrs          []string
+	AccountState   []*core.AccountState
 	HydrationAddrs []string
 	HydrationState []*core.AccountState
-
 	ShadowCapsules []ShadowCapsule
 	DualReceipts   []DualAnchorReceipt
 	RVCs           []*ReshardingValidityCertificate
 	Algorithm      string
 	Stage          string
-
-	ATid uint64
+	ATid           uint64
 }
 
 type PartitionReady struct {
@@ -88,24 +82,17 @@ type PartitionReady struct {
 
 // this message used in inter-shard, it will be sent between leaders.
 type AccountStateAndTx struct {
-	Addrs        []string
-	AccountState []*core.AccountState
-
+	Addrs          []string
+	AccountState   []*core.AccountState
 	HydrationAddrs []string
 	HydrationState []*core.AccountState
-
 	ShadowCapsules []ShadowCapsule
 	DualReceipts   []DualAnchorReceipt
 	RVC            *ReshardingValidityCertificate
 	Algorithm      string
 	Stage          string
-
-	Txs       []*core.Transaction
-	FromShard uint64
-}
-
-type InnerTx2CrossTx struct {
-	Txs []*core.Transaction
+	Txs            []*core.Transaction
+	FromShard      uint64
 }
 
 func (atm *AccountTransferMsg) Encode() []byte {
@@ -120,12 +107,10 @@ func (atm *AccountTransferMsg) Encode() []byte {
 
 func DecodeAccountTransferMsg(content []byte) *AccountTransferMsg {
 	var atm AccountTransferMsg
-
 	decoder := gob.NewDecoder(bytes.NewReader(content))
 	err := decoder.Decode(&atm)
 	if err != nil {
 		log.Panic(err)
 	}
-
 	return &atm
 }

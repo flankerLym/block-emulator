@@ -253,7 +253,7 @@ func (zcm *ZKSCARCommitteeMod_Broker) buildPartitionMeta(m map[string]uint64, ep
 	return pm
 }
 
-func (zcm *ZKSCARCommitteeMod_Broker) partitionMapSend(
+func (zcm *ZKSCARCommitteeMod_Broker) partitionMapSend(pm message.PartitionModifiedMap) {
 	pmByte, err := json.Marshal(pm)
 	if err != nil {
 		log.Panic(err)
