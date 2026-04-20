@@ -1,235 +1,235 @@
 package committee
 
 import (
+	"blockEmulator/core"
 	"blockEmulator/message"
 	"blockEmulator/networks"
-	"blockEmulator/partition"
 	"blockEmulator/params"
+	"blockEmulator/partition"
 	"blockEmulator/supervisor/signal"
 	"blockEmulator/supervisor/supervisor_log"
+	"blockEmulator/utils"
+	"encoding/csv"
 	"encoding/json"
+	"io"
 	"log"
+	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
-// ZKSCARCommitteeModule ZK-SCAR委员会模块
+// ZK-SCAR committee operations.
+// 注意：这里故意复用 CLPA 的消息链路和 worker 侧处理逻辑，
+// 仅替换 supervisor 侧"如何计算新的账户->分片映射"。
 type ZKSCARCommitteeModule struct {
-	Ip_nodeTable    map[uint64]map[uint64]string
-	Ss              *signal.StopSignal
-	Sl              *supervisor_log.SupervisorLog
-	DatasetFile     string
-	TotalDataSize   int
-	TxBatchSize     int
-	ReconfigTimeGap int
+	csvPath      string
+	dataTotalNum int
+	nowDataNum   int
+	batchDataNum int
 
-	// ZK-SCAR specific fields
-	partitioner     *partition.ZKSCARPartitioner
-	shadowCapsules  []partition.ShadowCapsule
-	batchTxs        [][]message.Tx
-	batchLock       sync.Mutex
-	lastReconfigTime time.Time
+	curEpoch              int32
+	zkscarLock            sync.Mutex
+	zkscarGraph           *partition.ZKSCARState
+	modifiedMap           map[string]uint64
+	zkscarLastRunningTime time.Time
+	zkscarFreq            int
+
+	sl *supervisor_log.SupervisorLog
+
+	Ss          *signal.StopSignal
+	IpNodeTable map[uint64]map[uint64]string
 }
 
-// NewZKSCARCommitteeModule 创建新的ZK-SCAR委员会模块
-func NewZKSCARCommitteeModule(ipMap map[uint64]map[uint64]string, ss *signal.StopSignal, sl *supervisor_log.SupervisorLog, datasetFile string, totalDataSize, txBatchSize, reconfigTimeGap int) CommitteeModule {
-	module := &ZKSCARCommitteeModule{
-		Ip_nodeTable:    ipMap,
-		Ss:              ss,
-		Sl:              sl,
-		DatasetFile:     datasetFile,
-		TotalDataSize:   totalDataSize,
-		TxBatchSize:     txBatchSize,
-		ReconfigTimeGap: reconfigTimeGap,
-		batchTxs:        make([][]message.Tx, 0),
-		lastReconfigTime: time.Now(),
+func NewZKSCARCommitteeModule(Ip_nodeTable map[uint64]map[uint64]string, Ss *signal.StopSignal, sl *supervisor_log.SupervisorLog, csvFilePath string, dataNum, batchNum, reconfigFrequency int) *ZKSCARCommitteeModule {
+	zg := new(partition.ZKSCARState)
+	zg.Init_ZKSCARState(0.35, 0.25, 1.0, 50, params.ShardNum)
+
+	return &ZKSCARCommitteeModule{
+		csvPath:               csvFilePath,
+		dataTotalNum:          dataNum,
+		batchDataNum:          batchNum,
+		nowDataNum:            0,
+		zkscarGraph:           zg,
+		modifiedMap:           make(map[string]uint64),
+		zkscarFreq:            reconfigFrequency,
+		zkscarLastRunningTime: time.Time{},
+		IpNodeTable:           Ip_nodeTable,
+		Ss:                    Ss,
+		sl:                    sl,
+		curEpoch:              0,
 	}
-	
-	// 初始化ZK-SCAR分区器
-	module.partitioner = partition.NewZKSCARPartitioner(params.ShardNum, 10000) // 假设10000个账户
-	module.partitioner.Initialize()
-	
-	return module
 }
 
-// MsgSendingControl 消息发送控制
-func (d *ZKSCARCommitteeModule) MsgSendingControl() {
-	// 读取交易数据
-	txs := readTxFromDataset(d.DatasetFile, d.TotalDataSize)
-	if len(txs) == 0 {
-		d.Sl.Slog.Println("No transactions found in dataset file!")
+func (zcm *ZKSCARCommitteeModule) HandleOtherMessage([]byte) {}
+
+func (zcm *ZKSCARCommitteeModule) fetchModifiedMap(key string) uint64 {
+	if val, ok := zcm.modifiedMap[key]; !ok {
+		return uint64(utils.Addr2Shard(key))
+	} else {
+		return val
+	}
+}
+
+func (zcm *ZKSCARCommitteeModule) txSending(txlist []*core.Transaction) {
+	sendToShard := make(map[uint64][]*core.Transaction)
+
+	for idx := 0; idx <= len(txlist); idx++ {
+		if idx > 0 && (idx%params.InjectSpeed == 0 || idx == len(txlist)) {
+			for sid := uint64(0); sid < uint64(params.ShardNum); sid++ {
+				it := message.InjectTxs{
+					Txs:       sendToShard[sid],
+					ToShardID: sid,
+				}
+				itByte, err := json.Marshal(it)
+				if err != nil {
+					log.Panic(err)
+				}
+				sendMsg := message.MergeMessage(message.CInject, itByte)
+				go networks.TcpDial(sendMsg, zcm.IpNodeTable[sid][0])
+			}
+			sendToShard = make(map[uint64][]*core.Transaction)
+			time.Sleep(time.Second)
+		}
+
+		if idx == len(txlist) {
+			break
+		}
+
+		tx := txlist[idx]
+		senderSid := zcm.fetchModifiedMap(tx.Sender)
+		sendToShard[senderSid] = append(sendToShard[senderSid], tx)
+	}
+}
+
+func (zcm *ZKSCARCommitteeModule) MsgSendingControl() {
+	txfile, err := os.Open(zcm.csvPath)
+	if err != nil {
+		log.Panic(err)
+	}
+	defer txfile.Close()
+
+	reader := csv.NewReader(txfile)
+	txlist := make([]*core.Transaction, 0)
+	zkscarCnt := 0
+
+	for {
+		data, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			log.Panic(err)
+		}
+
+		if tx, ok := data2tx(data, uint64(zcm.nowDataNum)); ok {
+			txlist = append(txlist, tx)
+			zcm.nowDataNum++
+		} else {
+			continue
+		}
+
+		if len(txlist) == int(zcm.batchDataNum) || zcm.nowDataNum == zcm.dataTotalNum {
+			if zcm.zkscarLastRunningTime.IsZero() {
+				zcm.zkscarLastRunningTime = time.Now()
+			}
+
+			zcm.txSending(txlist)
+			txlist = make([]*core.Transaction, 0)
+			zcm.Ss.StopGap_Reset()
+		}
+
+		if params.ShardNum > 1 && !zcm.zkscarLastRunningTime.IsZero() &&
+			time.Since(zcm.zkscarLastRunningTime) >= time.Duration(zcm.zkscarFreq)*time.Second {
+
+			zcm.zkscarLock.Lock()
+			zkscarCnt++
+
+			mmap, _ := zcm.zkscarGraph.ZKSCAR_Partition()
+			zcm.partitionMapSend(mmap)
+			for key, val := range mmap {
+				zcm.modifiedMap[key] = val
+			}
+			zcm.zkscarReset()
+			zcm.zkscarLock.Unlock()
+
+			for atomic.LoadInt32(&zcm.curEpoch) != int32(zkscarCnt) {
+				time.Sleep(time.Second)
+			}
+			zcm.zkscarLastRunningTime = time.Now()
+			zcm.sl.Slog.Println("Next ZK-SCAR epoch begins.")
+		}
+
+		if zcm.nowDataNum == zcm.dataTotalNum {
+			break
+		}
+	}
+
+	for !zcm.Ss.GapEnough() {
+		time.Sleep(time.Second)
+
+		if params.ShardNum > 1 && time.Since(zcm.zkscarLastRunningTime) >= time.Duration(zcm.zkscarFreq)*time.Second {
+			zcm.zkscarLock.Lock()
+			zkscarCnt++
+
+			mmap, _ := zcm.zkscarGraph.ZKSCAR_Partition()
+			zcm.partitionMapSend(mmap)
+			for key, val := range mmap {
+				zcm.modifiedMap[key] = val
+			}
+			zcm.zkscarReset()
+			zcm.zkscarLock.Unlock()
+
+			for atomic.LoadInt32(&zcm.curEpoch) != int32(zkscarCnt) {
+				time.Sleep(time.Second)
+			}
+			zcm.sl.Slog.Println("Next ZK-SCAR epoch begins.")
+			zcm.zkscarLastRunningTime = time.Now()
+		}
+	}
+}
+
+func (zcm *ZKSCARCommitteeModule) partitionMapSend(m map[string]uint64) {
+	pm := message.PartitionModifiedMap{
+		PartitionModified: m,
+	}
+	pmByte, err := json.Marshal(pm)
+	if err != nil {
+		log.Panic(err)
+	}
+
+	sendMsg := message.MergeMessage(message.CPartitionMsg, pmByte)
+	for i := uint64(0); i < uint64(params.ShardNum); i++ {
+		go networks.TcpDial(sendMsg, zcm.IpNodeTable[i][0])
+	}
+	zcm.sl.Slog.Println("Supervisor: all ZK-SCAR partition map messages have been sent.")
+}
+
+func (zcm *ZKSCARCommitteeModule) zkscarReset() {
+	zcm.zkscarGraph = new(partition.ZKSCARState)
+	zcm.zkscarGraph.Init_ZKSCARState(0.35, 0.25, 1.0, 50, params.ShardNum)
+	for key, val := range zcm.modifiedMap {
+		zcm.zkscarGraph.PartitionMap[partition.Vertex{Addr: key}] = int(val)
+	}
+}
+
+func (zcm *ZKSCARCommitteeModule) HandleBlockInfo(b *message.BlockInfoMsg) {
+	zcm.sl.Slog.Printf("Supervisor: received from shard %d in epoch %d.\n", b.SenderShardID, b.Epoch)
+
+	if atomic.CompareAndSwapInt32(&zcm.curEpoch, int32(b.Epoch-1), int32(b.Epoch)) {
+		zcm.sl.Slog.Println("this curEpoch is updated", b.Epoch)
+	}
+
+	if b.BlockBodyLength == 0 {
 		return
 	}
 
-	txCount := 0
-	batchIndex := 0
-
-	for txCount < len(txs) {
-		// 检查是否需要重新分区
-		d.checkAndReconfig()
-
-		// 准备当前批次的交易
-		end := txCount + d.TxBatchSize
-		if end > len(txs) {
-			end = len(txs)
-		}
-		currentBatch := txs[txCount:end]
-		txCount = end
-
-		// 处理阴影胶囊
-		d.processShadowCapsules()
-
-		// 发送分区消息
-		d.sendPartitionMessage()
-
-		// 发送交易消息
-		d.sendTxMessages(currentBatch, batchIndex)
-
-		batchIndex++
-		// 模拟交易处理时间
-		time.Sleep(time.Duration(params.Block_Interval) * time.Millisecond)
+	zcm.zkscarLock.Lock()
+	for _, tx := range b.InnerShardTxs {
+		zcm.zkscarGraph.AddEdge(partition.Vertex{Addr: tx.Sender}, partition.Vertex{Addr: tx.Recipient})
 	}
-
-	// 发送最后一个空批次，通知节点交易结束
-	d.sendEmptyBatch(batchIndex)
-}
-
-// checkAndReconfig 检查并执行重新分区
-func (d *ZKSCARCommitteeModule) checkAndReconfig() {
-	if time.Since(d.lastReconfigTime).Seconds() > float64(d.ReconfigTimeGap) {
-		d.Sl.Slog.Println("Performing ZK-SCAR reconfiguration...")
-		
-		// 处理阴影胶囊
-		d.processShadowCapsules()
-		
-		// 发送分区消息
-		d.sendPartitionMessage()
-		
-		d.lastReconfigTime = time.Now()
+	for _, r2tx := range b.Relay2Txs {
+		zcm.zkscarGraph.AddEdge(partition.Vertex{Addr: r2tx.Sender}, partition.Vertex{Addr: r2tx.Recipient})
 	}
-}
-
-// processShadowCapsules 处理阴影胶囊
-func (d *ZKSCARCommitteeModule) processShadowCapsules() {
-	if len(d.shadowCapsules) > 0 {
-		for _, capsule := range d.shadowCapsules {
-			d.partitioner.AddShadowCapsule(capsule)
-		}
-		
-		validCapsules := d.partitioner.ProcessShadowCapsules()
-		d.Sl.Slog.Printf("Processed %d valid shadow capsules", len(validCapsules))
-		
-		// 清空阴影胶囊
-		d.shadowCapsules = make([]partition.ShadowCapsule, 0)
-	}
-}
-
-// sendPartitionMessage 发送分区消息
-func (d *ZKSCARCommitteeModule) sendPartitionMessage() {
-	partitionMsg := d.partitioner.GeneratePartitionMessage()
-	partitionData, err := json.Marshal(partitionMsg)
-	if err != nil {
-		log.Panicf("Failed to marshal partition message: %v", err)
-	}
-	
-	msg := message.MergeMessage(message.CPartition, partitionData)
-	
-	// 发送给所有节点
-	for sid := uint64(0); sid < uint64(params.ShardNum); sid++ {
-		for nid := uint64(0); nid < uint64(params.NodesInShard); nid++ {
-			networks.TcpDial(msg, d.Ip_nodeTable[sid][nid])
-		}
-	}
-	
-	d.Sl.Slog.Println("Sent partition message to all nodes")
-}
-
-// sendTxMessages 发送交易消息
-func (d *ZKSCARCommitteeModule) sendTxMessages(txs []message.Tx, batchIndex int) {
-	// 按分片分组交易
-	txGroups := make(map[uint64][]message.Tx)
-	for _, tx := range txs {
-		shardID := d.partitioner.GetPartition()[tx.From]
-		txGroups[shardID] = append(txGroups[shardID], tx)
-	}
-
-	// 发送给每个分片的领导者
-	for shardID, groupTxs := range txGroups {
-		txData, err := json.Marshal(groupTxs)
-		if err != nil {
-			log.Panicf("Failed to marshal tx data: %v", err)
-		}
-
-		txMsg := &message.TxMsg{
-			ShardID: params.SupervisorShard,
-			NodeID:  0,
-			TxData:  txData,
-			BatchID: batchIndex,
-		}
-
-		txMsgData, err := json.Marshal(txMsg)
-		if err != nil {
-			log.Panicf("Failed to marshal tx message: %v", err)
-		}
-
-		msg := message.MergeMessage(message.CTx, txMsgData)
-		// 发送给分片的领导者（假设节点0是领导者）
-		networks.TcpDial(msg, d.Ip_nodeTable[shardID][0])
-	}
-
-	d.Sl.Slog.Printf("Sent batch %d with %d transactions", batchIndex, len(txs))
-}
-
-// sendEmptyBatch 发送空批次
-func (d *ZKSCARCommitteeModule) sendEmptyBatch(batchIndex int) {
-	emptyTxMsg := &message.TxMsg{
-		ShardID: params.SupervisorShard,
-		NodeID:  0,
-		TxData:  []byte("[]"), // 空交易数组
-		BatchID: batchIndex,
-	}
-
-	txMsgData, err := json.Marshal(emptyTxMsg)
-	if err != nil {
-		log.Panicf("Failed to marshal empty tx message: %v", err)
-	}
-
-	msg := message.MergeMessage(message.CTx, txMsgData)
-
-	// 发送给所有节点
-	for sid := uint64(0); sid < uint64(params.ShardNum); sid++ {
-		for nid := uint64(0); nid < uint64(params.NodesInShard); nid++ {
-			networks.TcpDial(msg, d.Ip_nodeTable[sid][nid])
-		}
-	}
-
-	d.Sl.Slog.Printf("Sent empty batch %d to all nodes", batchIndex)
-}
-
-// HandleBlockInfo 处理区块信息
-func (d *ZKSCARCommitteeModule) HandleBlockInfo(bim *message.BlockInfoMsg) {
-	// 处理区块信息，更新热点分数
-	d.partitioner.HandleBlockInfo(bim)
-	
-	// 生成并添加阴影胶囊
-	if bim.BlockBodyLength > 0 {
-		// 模拟生成阴影胶囊
-		for i := uint64(0); i < bim.BlockBodyLength; i++ {
-			accountID := uint64(i % 10000) // 模拟账户ID
-			currentShard := d.partitioner.GetPartition()[accountID]
-			capsule := d.partitioner.GenerateShadowCapsule(accountID, currentShard, bim.BlockBodyLength)
-			d.shadowCapsules = append(d.shadowCapsules, capsule)
-		}
-	}
-}
-
-// HandleOtherMessage 处理其他消息
-func (d *ZKSCARCommitteeModule) HandleOtherMessage(msg []byte) {
-	// 处理其他类型的消息
-	// 这里可以添加自定义消息处理逻辑
-}
-
-// GetName 获取模块名称
-func (d *ZKSCARCommitteeModule) GetName() string {
-	return "ZKSCAR_Committee"
+	zcm.zkscarLock.Unlock()
 }

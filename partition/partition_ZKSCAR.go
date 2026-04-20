@@ -1,216 +1,211 @@
 package partition
 
 import (
-	"blockEmulator/message"
-	"blockEmulator/params"
-	"encoding/json"
-	"fmt"
-	"log"
-	"math/rand"
-	"time"
+	"blockEmulator/utils"
+	"math"
 )
 
-// ShadowCapsule 阴影胶囊，用于ZK-SCAR算法
+// ShadowCapsule 是 ZK-SCAR 中的"影子胶囊"抽象。
+// 这里不直接实现真正的零知识证明电路，而是在协议仿真层保留
+// "待迁移账户 + 当前分片 + 目标分片 + 迁移收益"的最小信息，
+// 供 supervisor 侧的重分片算法使用。
 type ShadowCapsule struct {
-	AccountID   uint64
-	CurrentShard uint64
-	TargetShard  uint64
-	TransactionCount uint64
-	HotspotScore   float64
-	ValidityProof  []byte // 有效性证明
+	Addr         string
+	CurrentShard int
+	TargetShard  int
+	Degree       int
+	LocalityGain float64
 }
 
-// ZKSCARConfig ZK-SCAR算法配置
-type ZKSCARConfig struct {
-	ShardCount         int
-	AccountCount       int
-	ShadowThreshold    float64 // 阴影阈值
-	HotspotThreshold   float64 // 热点阈值
-	MigrationBatchSize int     // 迁移批次大小
+// ZKSCARState 保存 ZK-SCAR 重分片算法运行所需的状态。
+// 它复用当前项目 CLPA 的图建模方式，但分片打分逻辑不同：
+// 1. 优先把高连接度账户迁到更多邻居所在的分片；
+// 2. 同时对目标分片负载做惩罚；
+// 3. 对频繁来回迁移给一个稳定性约束。
+type ZKSCARState struct {
+	NetGraph          Graph
+	PartitionMap      map[Vertex]int
+	VertexsNumInShard []int
+	ShardNum          int
+
+	MaxIterations  int
+	HotnessWeight  float64
+	BalanceWeight  float64
+	StabilityBias  float64
+	CrossShardEdge int
+
+	ShadowCapsules map[Vertex]ShadowCapsule
 }
 
-// ZKSCARPartitioner ZK-SCAR分区器
-type ZKSCARPartitioner struct {
-	config     *ZKSCARConfig
-	accountMap map[uint64]uint64 // accountID -> shardID
-	shadowCapsules []ShadowCapsule
-	rand *rand.Rand
+// Init_ZKSCARState 初始化算法参数。
+func (zs *ZKSCARState) Init_ZKSCARState(hotnessWeight, balanceWeight, stabilityBias float64, maxIter, sn int) {
+	zs.ShardNum = sn
+	zs.MaxIterations = maxIter
+	zs.HotnessWeight = hotnessWeight
+	zs.BalanceWeight = balanceWeight
+	zs.StabilityBias = stabilityBias
+	zs.VertexsNumInShard = make([]int, zs.ShardNum)
+	zs.PartitionMap = make(map[Vertex]int)
+	zs.ShadowCapsules = make(map[Vertex]ShadowCapsule)
 }
 
-// NewZKSCARPartitioner 创建新的ZK-SCAR分区器
-func NewZKSCARPartitioner(shardCount, accountCount int) *ZKSCARPartitioner {
-	source := rand.NewSource(time.Now().UnixNano())
-	return &ZKSCARPartitioner{
-		config: &ZKSCARConfig{
-			ShardCount:         shardCount,
-			AccountCount:       accountCount,
-			ShadowThreshold:    0.7,
-			HotspotThreshold:   0.8,
-			MigrationBatchSize: 100,
-		},
-		accountMap:     make(map[uint64]uint64),
-		shadowCapsules: make([]ShadowCapsule, 0),
-		rand:          rand.New(source),
+// AddVertex 加入节点；若此前已经有分片映射则保持，否则按地址尾数默认分片。
+func (zs *ZKSCARState) AddVertex(v Vertex) {
+	zs.NetGraph.AddVertex(v)
+	if _, ok := zs.PartitionMap[v]; !ok {
+		zs.PartitionMap[v] = utils.Addr2Shard(v.Addr)
 	}
 }
 
-// Initialize 初始化分区
-func (z *ZKSCARPartitioner) Initialize() map[uint64]uint64 {
-	// 初始随机分配
-	for i := uint64(0); i < uint64(z.config.AccountCount); i++ {
-		shardID := uint64(z.rand.Intn(z.config.ShardCount))
-		z.accountMap[i] = shardID
+// AddEdge 加入边，同时补齐端点默认分片。
+func (zs *ZKSCARState) AddEdge(u, v Vertex) {
+	if _, ok := zs.NetGraph.VertexSet[u]; !ok {
+		zs.AddVertex(u)
 	}
-	return z.accountMap
+	if _, ok := zs.NetGraph.VertexSet[v]; !ok {
+		zs.AddVertex(v)
+	}
+	zs.NetGraph.AddEdge(u, v)
 }
 
-// AddShadowCapsule 添加阴影胶囊
-func (z *ZKSCARPartitioner) AddShadowCapsule(capsule ShadowCapsule) {
-	z.shadowCapsules = append(z.shadowCapsules, capsule)
-}
-
-// ProcessShadowCapsules 处理阴影胶囊
-func (z *ZKSCARPartitioner) ProcessShadowCapsules() []ShadowCapsule {
-	validCapsules := make([]ShadowCapsule, 0)
-	
-	for _, capsule := range z.shadowCapsules {
-		if z.verifyCapsule(capsule) {
-			validCapsules = append(validCapsules, capsule)
+// recomputeShardVertexCount 重新统计每个分片中的账户数。
+func (zs *ZKSCARState) recomputeShardVertexCount() {
+	zs.VertexsNumInShard = make([]int, zs.ShardNum)
+	for v := range zs.NetGraph.VertexSet {
+		if _, ok := zs.PartitionMap[v]; !ok {
+			zs.PartitionMap[v] = utils.Addr2Shard(v.Addr)
 		}
+		zs.VertexsNumInShard[zs.PartitionMap[v]]++
 	}
-	
-	// 按热点分数排序
-	z.sortCapsulesByHotspotScore(validCapsules)
-	
-	// 处理迁移
-	z.processMigrations(validCapsules)
-	
-	// 清空处理过的胶囊
-	z.shadowCapsules = make([]ShadowCapsule, 0)
-	
-	return validCapsules
 }
 
-// verifyCapsule 验证胶囊有效性
-func (z *ZKSCARPartitioner) verifyCapsule(capsule ShadowCapsule) bool {
-	// 简化的验证逻辑，实际应使用零知识证明
-	return capsule.ValidityProof != nil && len(capsule.ValidityProof) > 0
-}
-
-// sortCapsulesByHotspotScore 按热点分数排序胶囊
-func (z *ZKSCARPartitioner) sortCapsulesByHotspotScore(capsules []ShadowCapsule) {
-	// 简单的冒泡排序
-	for i := 0; i < len(capsules)-1; i++ {
-		for j := 0; j < len(capsules)-i-1; j++ {
-			if capsules[j].HotspotScore < capsules[j+1].HotspotScore {
-				capsules[j], capsules[j+1] = capsules[j+1], capsules[j]
+// recomputeCrossShardEdges 重新统计跨分片边数。
+func (zs *ZKSCARState) recomputeCrossShardEdges() {
+	cross := 0
+	for v, lst := range zs.NetGraph.EdgeSet {
+		vShard := zs.PartitionMap[v]
+		for _, u := range lst {
+			if zs.PartitionMap[u] != vShard {
+				cross++
 			}
 		}
 	}
+	zs.CrossShardEdge = cross / 2
 }
 
-// processMigrations 处理迁移
-func (z *ZKSCARPartitioner) processMigrations(capsules []ShadowCapsule) {
-	processed := 0
-	for _, capsule := range capsules {
-		if processed >= z.config.MigrationBatchSize {
+// scoreMove 计算把 v 放到 targetShard 的分数。
+// 分数越高越优：
+// - localityScore：邻居越多落在目标分片，得分越高；
+// - balancePenalty：目标分片越拥挤，惩罚越大；
+// - stabilityTerm：留在原分片会有轻微稳定性偏置，减少抖动。
+func (zs *ZKSCARState) scoreMove(v Vertex, targetShard int) float64 {
+	neighbors := zs.NetGraph.EdgeSet[v]
+	degree := len(neighbors)
+	currentShard := zs.PartitionMap[v]
+
+	if degree == 0 {
+		if targetShard == currentShard {
+			return zs.StabilityBias * 0.05
+		}
+		return -math.MaxFloat64
+	}
+
+	internalCnt := 0
+	for _, u := range neighbors {
+		if zs.PartitionMap[u] == targetShard {
+			internalCnt++
+		}
+	}
+
+	localityScore := float64(internalCnt) / float64(degree)
+
+	avgLoad := float64(len(zs.NetGraph.VertexSet)) / float64(zs.ShardNum)
+	if avgLoad < 1 {
+		avgLoad = 1
+	}
+	targetLoad := float64(zs.VertexsNumInShard[targetShard] + 1)
+	balancePenalty := math.Abs(targetLoad-avgLoad) / avgLoad
+
+	score := localityScore + zs.HotnessWeight*localityScore - zs.BalanceWeight*balancePenalty
+
+	if targetShard == currentShard {
+		score += zs.StabilityBias * 0.05
+	} else {
+		score -= zs.StabilityBias * 0.01
+	}
+
+	if currentShard != targetShard && zs.VertexsNumInShard[currentShard] <= 1 {
+		return -math.MaxFloat64
+	}
+
+	return score
+}
+
+// ZKSCAR_Partition 运行一次 ZK-SCAR 划分。
+// 返回值与 CLPA_Partition 保持一致：
+// map[string]uint64 记录发生迁移的账户及其目标分片；
+// int 为更新后的跨分片边数。
+func (zs *ZKSCARState) ZKSCAR_Partition() (map[string]uint64, int) {
+	res := make(map[string]uint64)
+	if len(zs.NetGraph.VertexSet) == 0 {
+		return res, 0
+	}
+
+	zs.recomputeShardVertexCount()
+	zs.recomputeCrossShardEdges()
+	zs.ShadowCapsules = make(map[Vertex]ShadowCapsule)
+
+	for iter := 0; iter < zs.MaxIterations; iter++ {
+		updated := false
+
+		for v := range zs.NetGraph.VertexSet {
+			currentShard := zs.PartitionMap[v]
+			bestShard := currentShard
+			bestScore := zs.scoreMove(v, currentShard)
+
+			checked := make(map[int]bool)
+			checked[currentShard] = true
+
+			for _, u := range zs.NetGraph.EdgeSet[v] {
+				targetShard := zs.PartitionMap[u]
+				if checked[targetShard] {
+					continue
+				}
+				checked[targetShard] = true
+
+				score := zs.scoreMove(v, targetShard)
+				if score > bestScore+1e-9 {
+					bestScore = score
+					bestShard = targetShard
+				}
+			}
+
+			if bestShard != currentShard {
+				zs.VertexsNumInShard[currentShard]--
+				zs.VertexsNumInShard[bestShard]++
+				zs.PartitionMap[v] = bestShard
+				res[v.Addr] = uint64(bestShard)
+				zs.ShadowCapsules[v] = ShadowCapsule{
+					Addr:         v.Addr,
+					CurrentShard: currentShard,
+					TargetShard:  bestShard,
+					Degree:       len(zs.NetGraph.EdgeSet[v]),
+					LocalityGain: bestScore,
+				}
+				updated = true
+			}
+		}
+
+		if !updated {
 			break
 		}
-		
-		// 执行迁移
-		z.accountMap[capsule.AccountID] = capsule.TargetShard
-		processed++
 	}
+
+	zs.recomputeCrossShardEdges()
+	return res, zs.CrossShardEdge
 }
 
-// GenerateShadowCapsule 生成阴影胶囊
-func (z *ZKSCARPartitioner) GenerateShadowCapsule(accountID, currentShard uint64, txCount uint64) ShadowCapsule {
-	// 计算热点分数
-	hotspotScore := float64(txCount) / 1000.0
-	if hotspotScore > 1.0 {
-		hotspotScore = 1.0
-	}
-	
-	// 确定目标分片
-	targetShard := currentShard
-	if hotspotScore > z.config.HotspotThreshold {
-		// 随机选择一个不同的分片
-		for targetShard == currentShard {
-			targetShard = uint64(z.rand.Intn(z.config.ShardCount))
-		}
-	}
-	
-	// 生成简单的有效性证明
-	proof := []byte(fmt.Sprintf("proof_%d_%d_%d", accountID, currentShard, targetShard))
-	
-	return ShadowCapsule{
-		AccountID:        accountID,
-		CurrentShard:     currentShard,
-		TargetShard:      targetShard,
-		TransactionCount: txCount,
-		HotspotScore:     hotspotScore,
-		ValidityProof:    proof,
-	}
-}
-
-// GetPartition 获取当前分区
-func (z *ZKSCARPartitioner) GetPartition() map[uint64]uint64 {
-	return z.accountMap
-}
-
-// HandleBlockInfo 处理区块信息，用于更新热点分数
-func (z *ZKSCARPartitioner) HandleBlockInfo(bim *message.BlockInfoMsg) {
-	// 这里可以根据区块信息更新热点分数
-	// 简化实现，实际应根据交易内容计算
-}
-
-// GeneratePartitionMessage 生成分区消息
-func (z *ZKSCARPartitioner) GeneratePartitionMessage() *message.PartitionMsg {
-	partitionData, err := json.Marshal(z.accountMap)
-	if err != nil {
-		log.Panicf("Failed to marshal partition data: %v", err)
-	}
-	
-	return &message.PartitionMsg{
-		ShardID:       params.SupervisorShard,
-		NodeID:        0,
-		PartitionData: partitionData,
-		Timestamp:     time.Now().UnixNano(),
-	}
-}
-
-// ApplyPartition 应用分区
-func (z *ZKSCARPartitioner) ApplyPartition(partitionMsg *message.PartitionMsg) {
-	err := json.Unmarshal(partitionMsg.PartitionData, &z.accountMap)
-	if err != nil {
-		log.Panicf("Failed to unmarshal partition data: %v", err)
-	}
-}
-
-// CalculateLoadBalance 计算负载均衡度
-func (z *ZKSCARPartitioner) CalculateLoadBalance() float64 {
-	shardCounts := make(map[uint64]int)
-	for _, shardID := range z.accountMap {
-		shardCounts[shardID]++
-	}
-	
-	if len(shardCounts) == 0 {
-		return 1.0
-	}
-	
-	avg := float64(len(z.accountMap)) / float64(z.config.ShardCount)
-	variance := 0.0
-	for _, count := range shardCounts {
-		diff := float64(count) - avg
-		variance += diff * diff
-	}
-	variance /= float64(len(shardCounts))
-	
-	// 计算均衡度 (0-1，越接近1越均衡)
-	maxVariance := avg * avg * float64(z.config.ShardCount-1)
-	if maxVariance == 0 {
-		return 1.0
-	}
-	
-	return 1.0 - (variance / maxVariance)
+// EraseEdges 在一个 epoch 完成后清空交易图边集合，保留账户当前分片结果。
+func (zs *ZKSCARState) EraseEdges() {
+	zs.NetGraph.EdgeSet = make(map[Vertex][]Vertex)
 }

@@ -13,7 +13,7 @@
   "RelayWithMerkleProof": 0,
   "DatasetFile": "./selectedTxs_300K.csv",
   "ReconfigTimeGap": 50,
-  "ReconfigAlgorithm": "CLPA",
+  "ReconfigAlgorithm": "ZKSCAR",
   "Delay": -1,
   "JitterRange": -1,
   "Bandwidth": 10000000
