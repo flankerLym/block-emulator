@@ -45,9 +45,8 @@ func initConfig(nid, nnm, sid, snm uint64) *params.ChainConfig {
 }
 
 func BuildSupervisor(nnm, snm uint64) {
-	methodID := params.ConsensusMethod
 	var measureMod []string
-	if methodID == 0 || methodID == 2 {
+	if params.IsBrokerConsensusMethod() {
 		measureMod = params.MeasureBrokerMod
 	} else {
 		measureMod = params.MeasureRelayMod
@@ -55,15 +54,14 @@ func BuildSupervisor(nnm, snm uint64) {
 	measureMod = append(measureMod, "Tx_Details")
 
 	lsn := new(supervisor.Supervisor)
-	lsn.NewSupervisor(params.SupervisorAddr, initConfig(123, nnm, 123, snm), params.CommitteeMethod[methodID], measureMod...)
+	lsn.NewSupervisor(params.SupervisorAddr, initConfig(123, nnm, 123, snm), params.GetSupervisorCommitteeMethod(), measureMod...)
 	go lsn.TcpListen()
 	time.Sleep(5000 * time.Millisecond)
 	lsn.SupervisorTxHandling()
 }
 
 func BuildNewPbftNode(nid, nnm, sid, snm uint64) {
-	methodID := params.ConsensusMethod
-	worker := pbft_all.NewPbftNode(sid, nid, initConfig(nid, nnm, sid, snm), params.CommitteeMethod[methodID])
+	worker := pbft_all.NewPbftNode(sid, nid, initConfig(nid, nnm, sid, snm), params.GetWorkerCommitteeMethod())
 	go worker.TcpListen()
 	worker.Propose()
 }

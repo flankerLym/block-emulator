@@ -10,8 +10,8 @@ import (
 var (
 	// The following parameters can be set in main.go.
 	// default values:
-	NodesInShard = 4 // \# of Nodes in a shard.
-	ShardNum     = 4 // \# of shards.
+	NodesInShard = 4 // # of Nodes in a shard.
+	ShardNum     = 4 // # of shards.
 )
 
 // consensus layer & output file path
@@ -41,7 +41,8 @@ var (
 	SupervisorAddr = "127.0.0.1:18800"        // Supervisor ip address
 	DatasetFile    = `./selectedTxs_300K.csv` // The raw BlockTransaction data path
 
-	ReconfigTimeGap = 50 // The time gap between epochs. This variable is only used in CLPA / CLPA_Broker now.
+	ReconfigTimeGap   = 50 // The time gap between epochs. This variable is only used in CLPA / CLPA_Broker now.
+	ReconfigAlgorithm = "" // NONE / CLPA / ZKSCAR. Empty string keeps backward-compatible behavior.
 )
 
 // network layer
@@ -73,6 +74,7 @@ type globalConfig struct {
 	RelayWithMerkleProof int    `json:"RelayWithMerkleProof"`
 	DatasetFile          string `json:"DatasetFile"`
 	ReconfigTimeGap      int    `json:"ReconfigTimeGap"`
+	ReconfigAlgorithm    string `json:"ReconfigAlgorithm"`
 
 	Delay       int `json:"Delay"`
 	JitterRange int `json:"JitterRange"`
@@ -121,6 +123,7 @@ func ReadConfigFile() {
 	DatasetFile = config.DatasetFile
 
 	ReconfigTimeGap = config.ReconfigTimeGap
+	ReconfigAlgorithm = config.ReconfigAlgorithm
 
 	// network params
 	Delay = config.Delay
