@@ -5,39 +5,35 @@ import (
 	"math"
 )
 
-// ShadowCapsule 是 ZK-SCAR 中的"影子胶囊"抽象。
-// 这里不直接实现真正的零知识证明电路，而是在协议仿真层保留
-// "待迁移账户 + 当前分片 + 目标分片 + 迁移收益"的最小信息，
-// 供 supervisor 侧的重分片算法使用。
+// ShadowCapsule 是 ZK-SCAR 在算法层的"迁移候选摘要"。
+// 注意：这里是 partition 包内部的算法视角，不等同于 message 包里真正随协议流转的 capsule。
 type ShadowCapsule struct {
 	Addr         string
 	CurrentShard int
 	TargetShard  int
 	Degree       int
+
+	HotnessScore float64
 	LocalityGain float64
 }
 
-// ZKSCARState 保存 ZK-SCAR 重分片算法运行所需的状态。
-// 它复用当前项目 CLPA 的图建模方式，但分片打分逻辑不同：
-// 1. 优先把高连接度账户迁到更多邻居所在的分片；
-// 2. 同时对目标分片负载做惩罚；
-// 3. 对频繁来回迁移给一个稳定性约束。
 type ZKSCARState struct {
 	NetGraph          Graph
 	PartitionMap      map[Vertex]int
 	VertexsNumInShard []int
 	ShardNum          int
 
-	MaxIterations  int
-	HotnessWeight  float64
-	BalanceWeight  float64
-	StabilityBias  float64
+	MaxIterations int
+
+	HotnessWeight float64
+	BalanceWeight float64
+	StabilityBias float64
+
 	CrossShardEdge int
 
 	ShadowCapsules map[Vertex]ShadowCapsule
 }
 
-// Init_ZKSCARState 初始化算法参数。
 func (zs *ZKSCARState) Init_ZKSCARState(hotnessWeight, balanceWeight, stabilityBias float64, maxIter, sn int) {
 	zs.ShardNum = sn
 	zs.MaxIterations = maxIter
@@ -49,7 +45,6 @@ func (zs *ZKSCARState) Init_ZKSCARState(hotnessWeight, balanceWeight, stabilityB
 	zs.ShadowCapsules = make(map[Vertex]ShadowCapsule)
 }
 
-// AddVertex 加入节点；若此前已经有分片映射则保持，否则按地址尾数默认分片。
 func (zs *ZKSCARState) AddVertex(v Vertex) {
 	zs.NetGraph.AddVertex(v)
 	if _, ok := zs.PartitionMap[v]; !ok {
@@ -57,7 +52,6 @@ func (zs *ZKSCARState) AddVertex(v Vertex) {
 	}
 }
 
-// AddEdge 加入边，同时补齐端点默认分片。
 func (zs *ZKSCARState) AddEdge(u, v Vertex) {
 	if _, ok := zs.NetGraph.VertexSet[u]; !ok {
 		zs.AddVertex(u)
@@ -68,7 +62,6 @@ func (zs *ZKSCARState) AddEdge(u, v Vertex) {
 	zs.NetGraph.AddEdge(u, v)
 }
 
-// recomputeShardVertexCount 重新统计每个分片中的账户数。
 func (zs *ZKSCARState) recomputeShardVertexCount() {
 	zs.VertexsNumInShard = make([]int, zs.ShardNum)
 	for v := range zs.NetGraph.VertexSet {
@@ -79,7 +72,6 @@ func (zs *ZKSCARState) recomputeShardVertexCount() {
 	}
 }
 
-// recomputeCrossShardEdges 重新统计跨分片边数。
 func (zs *ZKSCARState) recomputeCrossShardEdges() {
 	cross := 0
 	for v, lst := range zs.NetGraph.EdgeSet {
@@ -93,12 +85,40 @@ func (zs *ZKSCARState) recomputeCrossShardEdges() {
 	zs.CrossShardEdge = cross / 2
 }
 
+func (zs *ZKSCARState) averageDegree() float64 {
+	if len(zs.NetGraph.VertexSet) == 0 {
+		return 1.0
+	}
+	total := 0
+	for v := range zs.NetGraph.VertexSet {
+		total += len(zs.NetGraph.EdgeSet[v])
+	}
+	avg := float64(total) / float64(len(zs.NetGraph.VertexSet))
+	if avg < 1.0 {
+		return 1.0
+	}
+	return avg
+}
+
+func (zs *ZKSCARState) hotnessScore(v Vertex, avgDegree float64) float64 {
+	degree := float64(len(zs.NetGraph.EdgeSet[v]))
+	if avgDegree <= 0 {
+		return 0
+	}
+	score := degree / avgDegree
+	if score > 1.5 {
+		score = 1.5
+	}
+	return score
+}
+
 // scoreMove 计算把 v 放到 targetShard 的分数。
-// 分数越高越优：
-// - localityScore：邻居越多落在目标分片，得分越高；
-// - balancePenalty：目标分片越拥挤，惩罚越大；
-// - stabilityTerm：留在原分片会有轻微稳定性偏置，减少抖动。
-func (zs *ZKSCARState) scoreMove(v Vertex, targetShard int) float64 {
+// 当前分数由三部分构成：
+// 1. localityScore：邻居越多在目标分片，越好
+// 2. hotnessTerm：高热账户更重视 locality
+// 3. balancePenalty：目标分片越拥挤，惩罚越大
+// 4. stabilityBias：减少来回抖动
+func (zs *ZKSCARState) scoreMove(v Vertex, targetShard int, avgDegree float64) float64 {
 	neighbors := zs.NetGraph.EdgeSet[v]
 	degree := len(neighbors)
 	currentShard := zs.PartitionMap[v]
@@ -126,7 +146,10 @@ func (zs *ZKSCARState) scoreMove(v Vertex, targetShard int) float64 {
 	targetLoad := float64(zs.VertexsNumInShard[targetShard] + 1)
 	balancePenalty := math.Abs(targetLoad-avgLoad) / avgLoad
 
-	score := localityScore + zs.HotnessWeight*localityScore - zs.BalanceWeight*balancePenalty
+	hotness := zs.hotnessScore(v, avgDegree)
+	hotnessTerm := zs.HotnessWeight * hotness * localityScore
+
+	score := localityScore + hotnessTerm - zs.BalanceWeight*balancePenalty
 
 	if targetShard == currentShard {
 		score += zs.StabilityBias * 0.05
@@ -141,10 +164,6 @@ func (zs *ZKSCARState) scoreMove(v Vertex, targetShard int) float64 {
 	return score
 }
 
-// ZKSCAR_Partition 运行一次 ZK-SCAR 划分。
-// 返回值与 CLPA_Partition 保持一致：
-// map[string]uint64 记录发生迁移的账户及其目标分片；
-// int 为更新后的跨分片边数。
 func (zs *ZKSCARState) ZKSCAR_Partition() (map[string]uint64, int) {
 	res := make(map[string]uint64)
 	if len(zs.NetGraph.VertexSet) == 0 {
@@ -155,13 +174,16 @@ func (zs *ZKSCARState) ZKSCAR_Partition() (map[string]uint64, int) {
 	zs.recomputeCrossShardEdges()
 	zs.ShadowCapsules = make(map[Vertex]ShadowCapsule)
 
+	avgDegree := zs.averageDegree()
+
 	for iter := 0; iter < zs.MaxIterations; iter++ {
 		updated := false
 
 		for v := range zs.NetGraph.VertexSet {
 			currentShard := zs.PartitionMap[v]
+			currentScore := zs.scoreMove(v, currentShard, avgDegree)
 			bestShard := currentShard
-			bestScore := zs.scoreMove(v, currentShard)
+			bestScore := currentScore
 
 			checked := make(map[int]bool)
 			checked[currentShard] = true
@@ -173,7 +195,7 @@ func (zs *ZKSCARState) ZKSCAR_Partition() (map[string]uint64, int) {
 				}
 				checked[targetShard] = true
 
-				score := zs.scoreMove(v, targetShard)
+				score := zs.scoreMove(v, targetShard, avgDegree)
 				if score > bestScore+1e-9 {
 					bestScore = score
 					bestShard = targetShard
@@ -185,12 +207,14 @@ func (zs *ZKSCARState) ZKSCAR_Partition() (map[string]uint64, int) {
 				zs.VertexsNumInShard[bestShard]++
 				zs.PartitionMap[v] = bestShard
 				res[v.Addr] = uint64(bestShard)
+
 				zs.ShadowCapsules[v] = ShadowCapsule{
 					Addr:         v.Addr,
 					CurrentShard: currentShard,
 					TargetShard:  bestShard,
 					Degree:       len(zs.NetGraph.EdgeSet[v]),
-					LocalityGain: bestScore,
+					HotnessScore: zs.hotnessScore(v, avgDegree),
+					LocalityGain: bestScore - currentScore,
 				}
 				updated = true
 			}
@@ -205,7 +229,6 @@ func (zs *ZKSCARState) ZKSCAR_Partition() (map[string]uint64, int) {
 	return res, zs.CrossShardEdge
 }
 
-// EraseEdges 在一个 epoch 完成后清空交易图边集合，保留账户当前分片结果。
 func (zs *ZKSCARState) EraseEdges() {
 	zs.NetGraph.EdgeSet = make(map[Vertex][]Vertex)
 }

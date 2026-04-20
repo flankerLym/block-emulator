@@ -22,6 +22,14 @@ type Data_supportCLPA struct {
 
 	CollectOver bool       // judge whether all txs is collected or not
 	CollectLock sync.Mutex // lock for collect
+
+	// ---------- ZK-SCAR 扩展状态 ----------
+	PendingShadowCapsules map[string]*message.ShadowCapsule
+	PendingCertificates   []*message.ReshardingValidityCertificate
+	PendingDualAnchors    map[string]*message.DualAnchorReceipt
+
+	MigrationPhase string
+	HydrationQueue map[string]bool
 }
 
 func NewCLPADataSupport() *Data_supportCLPA {
@@ -35,5 +43,11 @@ func NewCLPADataSupport() *Data_supportCLPA {
 		PartitionReady:          make(map[uint64]bool),
 		CollectOver:             false,
 		ReadySeq:                make(map[uint64]uint64),
+
+		PendingShadowCapsules: make(map[string]*message.ShadowCapsule),
+		PendingCertificates:   make([]*message.ReshardingValidityCertificate, 0),
+		PendingDualAnchors:    make(map[string]*message.DualAnchorReceipt),
+		MigrationPhase:        "idle",
+		HydrationQueue:        make(map[string]bool),
 	}
 }

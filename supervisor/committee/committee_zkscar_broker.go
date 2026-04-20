@@ -180,11 +180,17 @@ func (zcm *ZKSCARCommitteeMod_Broker) MsgSendingControl() {
 			zcm.zkscarLock.Lock()
 			zkscarCnt++
 
-			mmap, _ := zcm.zkscarGraph.ZKSCAR_Partition()
+			mmap, crossEdges := zcm.zkscarGraph.ZKSCAR_Partition()
 			zcm.partitionMapSend(mmap)
 			for key, val := range mmap {
 				zcm.modifiedMap[key] = val
 			}
+
+			zcm.sl.Slog.Printf(
+				"ZK-SCAR_Broker reconfig epoch=%d modifiedAccounts=%d shadowCapsules=%d crossShardEdges=%d\n",
+				zkscarCnt, len(mmap), len(zcm.zkscarGraph.ShadowCapsules), crossEdges,
+			)
+
 			zcm.zkscarReset()
 			zcm.zkscarLock.Unlock()
 
@@ -207,11 +213,17 @@ func (zcm *ZKSCARCommitteeMod_Broker) MsgSendingControl() {
 			zcm.zkscarLock.Lock()
 			zkscarCnt++
 
-			mmap, _ := zcm.zkscarGraph.ZKSCAR_Partition()
+			mmap, crossEdges := zcm.zkscarGraph.ZKSCAR_Partition()
 			zcm.partitionMapSend(mmap)
 			for key, val := range mmap {
 				zcm.modifiedMap[key] = val
 			}
+
+			zcm.sl.Slog.Printf(
+				"ZK-SCAR_Broker reconfig epoch=%d modifiedAccounts=%d shadowCapsules=%d crossShardEdges=%d\n",
+				zkscarCnt, len(mmap), len(zcm.zkscarGraph.ShadowCapsules), crossEdges,
+			)
+
 			zcm.zkscarReset()
 			zcm.zkscarLock.Unlock()
 
@@ -227,6 +239,10 @@ func (zcm *ZKSCARCommitteeMod_Broker) MsgSendingControl() {
 func (zcm *ZKSCARCommitteeMod_Broker) partitionMapSend(m map[string]uint64) {
 	pm := message.PartitionModifiedMap{
 		PartitionModified: m,
+		Algorithm:         "ZKSCAR",
+		Epoch:             uint64(atomic.LoadInt32(&zcm.curEpoch) + 1),
+		CapsuleCount:      len(zcm.zkscarGraph.ShadowCapsules),
+		ProofType:         "pseudo-rvc",
 	}
 	pmByte, err := json.Marshal(pm)
 	if err != nil {
@@ -339,6 +355,7 @@ func (zcm *ZKSCARCommitteeMod_Broker) handleBrokerType1Mes(brokerType1Megs []*me
 		tx1.FinalRecipient = ctx.Recipient
 		tx1.RawTxHash = make([]byte, len(ctx.TxHash))
 		copy(tx1.RawTxHash, ctx.TxHash)
+
 		tx1s = append(tx1s, tx1)
 
 		confirm1 := &message.Mag1Confirm{
@@ -363,6 +380,7 @@ func (zcm *ZKSCARCommitteeMod_Broker) handleBrokerType2Mes(brokerType2Megs []*me
 		tx2.FinalRecipient = ctx.Recipient
 		tx2.RawTxHash = make([]byte, len(ctx.TxHash))
 		copy(tx2.RawTxHash, ctx.TxHash)
+
 		tx2s = append(tx2s, tx2)
 
 		confirm2 := &message.Mag2Confirm{

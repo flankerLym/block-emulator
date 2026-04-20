@@ -64,11 +64,10 @@ func NewZKSCARCommitteeModule(Ip_nodeTable map[uint64]map[uint64]string, Ss *sig
 func (zcm *ZKSCARCommitteeModule) HandleOtherMessage([]byte) {}
 
 func (zcm *ZKSCARCommitteeModule) fetchModifiedMap(key string) uint64 {
-	if val, ok := zcm.modifiedMap[key]; !ok {
-		return uint64(utils.Addr2Shard(key))
-	} else {
+	if val, ok := zcm.modifiedMap[key]; ok {
 		return val
 	}
+	return uint64(utils.Addr2Shard(key))
 }
 
 func (zcm *ZKSCARCommitteeModule) txSending(txlist []*core.Transaction) {
@@ -145,11 +144,17 @@ func (zcm *ZKSCARCommitteeModule) MsgSendingControl() {
 			zcm.zkscarLock.Lock()
 			zkscarCnt++
 
-			mmap, _ := zcm.zkscarGraph.ZKSCAR_Partition()
+			mmap, crossEdges := zcm.zkscarGraph.ZKSCAR_Partition()
 			zcm.partitionMapSend(mmap)
 			for key, val := range mmap {
 				zcm.modifiedMap[key] = val
 			}
+
+			zcm.sl.Slog.Printf(
+				"ZK-SCAR reconfig epoch=%d modifiedAccounts=%d shadowCapsules=%d crossShardEdges=%d\n",
+				zkscarCnt, len(mmap), len(zcm.zkscarGraph.ShadowCapsules), crossEdges,
+			)
+
 			zcm.zkscarReset()
 			zcm.zkscarLock.Unlock()
 
@@ -172,19 +177,25 @@ func (zcm *ZKSCARCommitteeModule) MsgSendingControl() {
 			zcm.zkscarLock.Lock()
 			zkscarCnt++
 
-			mmap, _ := zcm.zkscarGraph.ZKSCAR_Partition()
+			mmap, crossEdges := zcm.zkscarGraph.ZKSCAR_Partition()
 			zcm.partitionMapSend(mmap)
 			for key, val := range mmap {
 				zcm.modifiedMap[key] = val
 			}
+
+			zcm.sl.Slog.Printf(
+				"ZK-SCAR reconfig epoch=%d modifiedAccounts=%d shadowCapsules=%d crossShardEdges=%d\n",
+				zkscarCnt, len(mmap), len(zcm.zkscarGraph.ShadowCapsules), crossEdges,
+			)
+
 			zcm.zkscarReset()
 			zcm.zkscarLock.Unlock()
 
 			for atomic.LoadInt32(&zcm.curEpoch) != int32(zkscarCnt) {
 				time.Sleep(time.Second)
 			}
-			zcm.sl.Slog.Println("Next ZK-SCAR epoch begins.")
 			zcm.zkscarLastRunningTime = time.Now()
+			zcm.sl.Slog.Println("Next ZK-SCAR epoch begins.")
 		}
 	}
 }
@@ -192,6 +203,10 @@ func (zcm *ZKSCARCommitteeModule) MsgSendingControl() {
 func (zcm *ZKSCARCommitteeModule) partitionMapSend(m map[string]uint64) {
 	pm := message.PartitionModifiedMap{
 		PartitionModified: m,
+		Algorithm:         "ZKSCAR",
+		Epoch:             uint64(atomic.LoadInt32(&zcm.curEpoch) + 1),
+		CapsuleCount:      len(zcm.zkscarGraph.ShadowCapsules),
+		ProofType:         "pseudo-rvc",
 	}
 	pmByte, err := json.Marshal(pm)
 	if err != nil {
