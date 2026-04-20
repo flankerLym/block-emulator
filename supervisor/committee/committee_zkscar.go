@@ -21,7 +21,7 @@ import (
 
 // ZK-SCAR committee operations.
 // 注意：这里故意复用 CLPA 的消息链路和 worker 侧处理逻辑，
-// 仅替换 supervisor 侧"如何计算新的账户->分片映射"。
+// 仅替换 supervisor 侧“如何计算新的账户->分片映射”。
 type ZKSCARCommitteeModule struct {
 	csvPath      string
 	dataTotalNum int
@@ -43,7 +43,13 @@ type ZKSCARCommitteeModule struct {
 
 func NewZKSCARCommitteeModule(Ip_nodeTable map[uint64]map[uint64]string, Ss *signal.StopSignal, sl *supervisor_log.SupervisorLog, csvFilePath string, dataNum, batchNum, reconfigFrequency int) *ZKSCARCommitteeModule {
 	zg := new(partition.ZKSCARState)
-	zg.Init_ZKSCARState(0.35, 0.25, 1.0, 50, params.ShardNum)
+	zg.Init_ZKSCARState(
+		params.ZKSCARHotnessWeight,
+		params.ZKSCARBalanceWeight,
+		params.ZKSCARStabilityBias,
+		params.ZKSCARMaxIterations,
+		params.ShardNum,
+	)
 
 	return &ZKSCARCommitteeModule{
 		csvPath:               csvFilePath,
@@ -144,17 +150,12 @@ func (zcm *ZKSCARCommitteeModule) MsgSendingControl() {
 			zcm.zkscarLock.Lock()
 			zkscarCnt++
 
-			mmap, crossEdges := zcm.zkscarGraph.ZKSCAR_Partition()
-			zcm.partitionMapSend(mmap)
+			mmap, _ := zcm.zkscarGraph.ZKSCAR_Partition()
+			pm := zcm.buildPartitionMeta(mmap, uint64(zkscarCnt))
+			zcm.partitionMapSend(pm)
 			for key, val := range mmap {
 				zcm.modifiedMap[key] = val
 			}
-
-			zcm.sl.Slog.Printf(
-				"ZK-SCAR reconfig epoch=%d modifiedAccounts=%d shadowCapsules=%d crossShardEdges=%d\n",
-				zkscarCnt, len(mmap), len(zcm.zkscarGraph.ShadowCapsules), crossEdges,
-			)
-
 			zcm.zkscarReset()
 			zcm.zkscarLock.Unlock()
 
@@ -177,37 +178,46 @@ func (zcm *ZKSCARCommitteeModule) MsgSendingControl() {
 			zcm.zkscarLock.Lock()
 			zkscarCnt++
 
-			mmap, crossEdges := zcm.zkscarGraph.ZKSCAR_Partition()
-			zcm.partitionMapSend(mmap)
+			mmap, _ := zcm.zkscarGraph.ZKSCAR_Partition()
+			pm := zcm.buildPartitionMeta(mmap, uint64(zkscarCnt))
+			zcm.partitionMapSend(pm)
 			for key, val := range mmap {
 				zcm.modifiedMap[key] = val
 			}
-
-			zcm.sl.Slog.Printf(
-				"ZK-SCAR reconfig epoch=%d modifiedAccounts=%d shadowCapsules=%d crossShardEdges=%d\n",
-				zkscarCnt, len(mmap), len(zcm.zkscarGraph.ShadowCapsules), crossEdges,
-			)
-
 			zcm.zkscarReset()
 			zcm.zkscarLock.Unlock()
 
 			for atomic.LoadInt32(&zcm.curEpoch) != int32(zkscarCnt) {
 				time.Sleep(time.Second)
 			}
-			zcm.zkscarLastRunningTime = time.Now()
 			zcm.sl.Slog.Println("Next ZK-SCAR epoch begins.")
+			zcm.zkscarLastRunningTime = time.Now()
 		}
 	}
 }
 
-func (zcm *ZKSCARCommitteeModule) partitionMapSend(m map[string]uint64) {
+func (zcm *ZKSCARCommitteeModule) buildPartitionMeta(m map[string]uint64, epochTag uint64) message.PartitionModifiedMap {
 	pm := message.PartitionModifiedMap{
 		PartitionModified: m,
 		Algorithm:         "ZKSCAR",
-		Epoch:             uint64(atomic.LoadInt32(&zcm.curEpoch) + 1),
-		CapsuleCount:      len(zcm.zkscarGraph.ShadowCapsules),
-		ProofType:         "pseudo-rvc",
+		EpochTag:          epochTag,
+		ShadowCapsules:    make([]message.ShadowCapsule, 0),
 	}
+	for _, cap := range zcm.zkscarGraph.SnapshotShadowCapsules() {
+		pm.ShadowCapsules = append(pm.ShadowCapsules, message.ShadowCapsule{
+			Addr:         cap.Addr,
+			CurrentShard: uint64(cap.CurrentShard),
+			TargetShard:  uint64(cap.TargetShard),
+			Degree:       cap.Degree,
+			Hotness:      cap.Hotness,
+			LocalityGain: cap.LocalityGain,
+			EpochTag:     epochTag,
+		})
+	}
+	return pm
+}
+
+func (zcm *ZKSCARCommitteeModule) partitionMapSend(pm message.PartitionModifiedMap) {
 	pmByte, err := json.Marshal(pm)
 	if err != nil {
 		log.Panic(err)
@@ -222,7 +232,13 @@ func (zcm *ZKSCARCommitteeModule) partitionMapSend(m map[string]uint64) {
 
 func (zcm *ZKSCARCommitteeModule) zkscarReset() {
 	zcm.zkscarGraph = new(partition.ZKSCARState)
-	zcm.zkscarGraph.Init_ZKSCARState(0.35, 0.25, 1.0, 50, params.ShardNum)
+	zcm.zkscarGraph.Init_ZKSCARState(
+		params.ZKSCARHotnessWeight,
+		params.ZKSCARBalanceWeight,
+		params.ZKSCARStabilityBias,
+		params.ZKSCARMaxIterations,
+		params.ShardNum,
+	)
 	for key, val := range zcm.modifiedMap {
 		zcm.zkscarGraph.PartitionMap[partition.Vertex{Addr: key}] = int(val)
 	}

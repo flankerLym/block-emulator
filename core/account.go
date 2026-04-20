@@ -24,6 +24,76 @@ type AccountState struct {
 	Balance     *big.Int
 	StorageRoot []byte // only for smart contract account
 	CodeHash    []byte // only for smart contract account
+
+	// ---- ZK-SCAR metadata ----
+	DebtRoot             []byte
+	EpochTag             uint64
+	OwnershipTransferred bool
+	Hydrated             bool
+	PendingHydration     bool
+	SourceShard          uint64
+	TargetShard          uint64
+	LastRVC              string
+}
+
+func cloneBigInt(v *big.Int) *big.Int {
+	if v == nil {
+		return big.NewInt(0)
+	}
+	return new(big.Int).Set(v)
+}
+
+func cloneBytes(v []byte) []byte {
+	if v == nil {
+		return nil
+	}
+	cp := make([]byte, len(v))
+	copy(cp, v)
+	return cp
+}
+
+func (as *AccountState) Clone() *AccountState {
+	if as == nil {
+		return nil
+	}
+	return &AccountState{
+		AcAddress:            as.AcAddress,
+		Nonce:                as.Nonce,
+		Balance:              cloneBigInt(as.Balance),
+		StorageRoot:          cloneBytes(as.StorageRoot),
+		CodeHash:             cloneBytes(as.CodeHash),
+		DebtRoot:             cloneBytes(as.DebtRoot),
+		EpochTag:             as.EpochTag,
+		OwnershipTransferred: as.OwnershipTransferred,
+		Hydrated:             as.Hydrated,
+		PendingHydration:     as.PendingHydration,
+		SourceShard:          as.SourceShard,
+		TargetShard:          as.TargetShard,
+		LastRVC:              as.LastRVC,
+	}
+}
+
+// BuildShadowState constructs the "ownership-transferred but not fully hydrated" state.
+func (as *AccountState) BuildShadowState(epochTag, sourceShard, targetShard uint64, debtRoot []byte, rvcID string) *AccountState {
+	shadow := as.Clone()
+	shadow.DebtRoot = cloneBytes(debtRoot)
+	shadow.EpochTag = epochTag
+	shadow.OwnershipTransferred = true
+	shadow.Hydrated = false
+	shadow.PendingHydration = true
+	shadow.SourceShard = sourceShard
+	shadow.TargetShard = targetShard
+	shadow.LastRVC = rvcID
+	return shadow
+}
+
+// FinalizeHydration marks the state as fully hydrated.
+func (as *AccountState) FinalizeHydration(epochTag uint64) *AccountState {
+	full := as.Clone()
+	full.EpochTag = epochTag
+	full.PendingHydration = false
+	full.Hydrated = true
+	return full
 }
 
 // Reduce the balance of an account

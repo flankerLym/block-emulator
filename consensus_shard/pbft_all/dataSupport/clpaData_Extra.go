@@ -7,7 +7,8 @@ import (
 )
 
 type Data_supportCLPA struct {
-	ModifiedMap             []map[string]uint64                   // record the modified map from the decider(s)
+	ModifiedMap             []map[string]uint64 // record the modified map from the decider(s)
+	PartitionMeta           []message.PartitionModifiedMap
 	AccountTransferRound    uint64                                // denote how many times accountTransfer do
 	ReceivedNewAccountState map[string]*core.AccountState         // the new accountState From other Shards
 	ReceivedNewTx           []*core.Transaction                   // new transactions from other shards' pool
@@ -23,18 +24,22 @@ type Data_supportCLPA struct {
 	CollectOver bool       // judge whether all txs is collected or not
 	CollectLock sync.Mutex // lock for collect
 
-	// ---------- ZK-SCAR 扩展状态 ----------
-	PendingShadowCapsules map[string]*message.ShadowCapsule
-	PendingCertificates   []*message.ReshardingValidityCertificate
-	PendingDualAnchors    map[string]*message.DualAnchorReceipt
+	// ---- ZK-SCAR runtime states ----
+	OwnershipTransferred map[string]bool
+	HydratedAccounts     map[string]bool
 
-	MigrationPhase string
-	HydrationQueue map[string]bool
+	PendingHydration      map[string]*core.AccountState
+	PendingHydrationRound map[string]uint64
+
+	RVCPool               map[string]*message.ReshardingValidityCertificate
+	DualAnchorReceiptPool map[string]*message.DualAnchorReceipt
+	ShadowCapsulePool     map[string]*message.ShadowCapsule
 }
 
 func NewCLPADataSupport() *Data_supportCLPA {
 	return &Data_supportCLPA{
 		ModifiedMap:             make([]map[string]uint64, 0),
+		PartitionMeta:           make([]message.PartitionModifiedMap, 0),
 		AccountTransferRound:    0,
 		ReceivedNewAccountState: make(map[string]*core.AccountState),
 		ReceivedNewTx:           make([]*core.Transaction, 0),
@@ -44,10 +49,12 @@ func NewCLPADataSupport() *Data_supportCLPA {
 		CollectOver:             false,
 		ReadySeq:                make(map[uint64]uint64),
 
-		PendingShadowCapsules: make(map[string]*message.ShadowCapsule),
-		PendingCertificates:   make([]*message.ReshardingValidityCertificate, 0),
-		PendingDualAnchors:    make(map[string]*message.DualAnchorReceipt),
-		MigrationPhase:        "idle",
-		HydrationQueue:        make(map[string]bool),
+		OwnershipTransferred:  make(map[string]bool),
+		HydratedAccounts:      make(map[string]bool),
+		PendingHydration:      make(map[string]*core.AccountState),
+		PendingHydrationRound: make(map[string]uint64),
+		RVCPool:               make(map[string]*message.ReshardingValidityCertificate),
+		DualAnchorReceiptPool: make(map[string]*message.DualAnchorReceipt),
+		ShadowCapsulePool:     make(map[string]*message.ShadowCapsule),
 	}
 }

@@ -52,7 +52,13 @@ type ZKSCARCommitteeMod_Broker struct {
 
 func NewZKSCARCommitteeMod_Broker(Ip_nodeTable map[uint64]map[uint64]string, Ss *signal.StopSignal, sl *supervisor_log.SupervisorLog, csvFilePath string, dataNum, batchNum, reconfigFrequency int) *ZKSCARCommitteeMod_Broker {
 	zg := new(partition.ZKSCARState)
-	zg.Init_ZKSCARState(0.35, 0.25, 1.0, 50, params.ShardNum)
+	zg.Init_ZKSCARState(
+		params.ZKSCARHotnessWeight,
+		params.ZKSCARBalanceWeight,
+		params.ZKSCARStabilityBias,
+		params.ZKSCARMaxIterations,
+		params.ShardNum,
+	)
 
 	brk := new(broker.Broker)
 	brk.NewBroker(nil)
@@ -180,17 +186,12 @@ func (zcm *ZKSCARCommitteeMod_Broker) MsgSendingControl() {
 			zcm.zkscarLock.Lock()
 			zkscarCnt++
 
-			mmap, crossEdges := zcm.zkscarGraph.ZKSCAR_Partition()
-			zcm.partitionMapSend(mmap)
+			mmap, _ := zcm.zkscarGraph.ZKSCAR_Partition()
+			pm := zcm.buildPartitionMeta(mmap, uint64(zkscarCnt))
+			zcm.partitionMapSend(pm)
 			for key, val := range mmap {
 				zcm.modifiedMap[key] = val
 			}
-
-			zcm.sl.Slog.Printf(
-				"ZK-SCAR_Broker reconfig epoch=%d modifiedAccounts=%d shadowCapsules=%d crossShardEdges=%d\n",
-				zkscarCnt, len(mmap), len(zcm.zkscarGraph.ShadowCapsules), crossEdges,
-			)
-
 			zcm.zkscarReset()
 			zcm.zkscarLock.Unlock()
 
@@ -213,17 +214,12 @@ func (zcm *ZKSCARCommitteeMod_Broker) MsgSendingControl() {
 			zcm.zkscarLock.Lock()
 			zkscarCnt++
 
-			mmap, crossEdges := zcm.zkscarGraph.ZKSCAR_Partition()
-			zcm.partitionMapSend(mmap)
+			mmap, _ := zcm.zkscarGraph.ZKSCAR_Partition()
+			pm := zcm.buildPartitionMeta(mmap, uint64(zkscarCnt))
+			zcm.partitionMapSend(pm)
 			for key, val := range mmap {
 				zcm.modifiedMap[key] = val
 			}
-
-			zcm.sl.Slog.Printf(
-				"ZK-SCAR_Broker reconfig epoch=%d modifiedAccounts=%d shadowCapsules=%d crossShardEdges=%d\n",
-				zkscarCnt, len(mmap), len(zcm.zkscarGraph.ShadowCapsules), crossEdges,
-			)
-
 			zcm.zkscarReset()
 			zcm.zkscarLock.Unlock()
 
@@ -236,14 +232,28 @@ func (zcm *ZKSCARCommitteeMod_Broker) MsgSendingControl() {
 	}
 }
 
-func (zcm *ZKSCARCommitteeMod_Broker) partitionMapSend(m map[string]uint64) {
+func (zcm *ZKSCARCommitteeMod_Broker) buildPartitionMeta(m map[string]uint64, epochTag uint64) message.PartitionModifiedMap {
 	pm := message.PartitionModifiedMap{
 		PartitionModified: m,
 		Algorithm:         "ZKSCAR",
-		Epoch:             uint64(atomic.LoadInt32(&zcm.curEpoch) + 1),
-		CapsuleCount:      len(zcm.zkscarGraph.ShadowCapsules),
-		ProofType:         "pseudo-rvc",
+		EpochTag:          epochTag,
+		ShadowCapsules:    make([]message.ShadowCapsule, 0),
 	}
+	for _, cap := range zcm.zkscarGraph.SnapshotShadowCapsules() {
+		pm.ShadowCapsules = append(pm.ShadowCapsules, message.ShadowCapsule{
+			Addr:         cap.Addr,
+			CurrentShard: uint64(cap.CurrentShard),
+			TargetShard:  uint64(cap.TargetShard),
+			Degree:       cap.Degree,
+			Hotness:      cap.Hotness,
+			LocalityGain: cap.LocalityGain,
+			EpochTag:     epochTag,
+		})
+	}
+	return pm
+}
+
+func (zcm *ZKSCARCommitteeMod_Broker) partitionMapSend(
 	pmByte, err := json.Marshal(pm)
 	if err != nil {
 		log.Panic(err)
@@ -258,7 +268,13 @@ func (zcm *ZKSCARCommitteeMod_Broker) partitionMapSend(m map[string]uint64) {
 
 func (zcm *ZKSCARCommitteeMod_Broker) zkscarReset() {
 	zcm.zkscarGraph = new(partition.ZKSCARState)
-	zcm.zkscarGraph.Init_ZKSCARState(0.35, 0.25, 1.0, 50, params.ShardNum)
+	zcm.zkscarGraph.Init_ZKSCARState(
+		params.ZKSCARHotnessWeight,
+		params.ZKSCARBalanceWeight,
+		params.ZKSCARStabilityBias,
+		params.ZKSCARMaxIterations,
+		params.ShardNum,
+	)
 	for key, val := range zcm.modifiedMap {
 		zcm.zkscarGraph.PartitionMap[partition.Vertex{Addr: key}] = int(val)
 	}
@@ -355,7 +371,6 @@ func (zcm *ZKSCARCommitteeMod_Broker) handleBrokerType1Mes(brokerType1Megs []*me
 		tx1.FinalRecipient = ctx.Recipient
 		tx1.RawTxHash = make([]byte, len(ctx.TxHash))
 		copy(tx1.RawTxHash, ctx.TxHash)
-
 		tx1s = append(tx1s, tx1)
 
 		confirm1 := &message.Mag1Confirm{
@@ -380,7 +395,6 @@ func (zcm *ZKSCARCommitteeMod_Broker) handleBrokerType2Mes(brokerType2Megs []*me
 		tx2.FinalRecipient = ctx.Recipient
 		tx2.RawTxHash = make([]byte, len(ctx.TxHash))
 		copy(tx2.RawTxHash, ctx.TxHash)
-
 		tx2s = append(tx2s, tx2)
 
 		confirm2 := &message.Mag2Confirm{

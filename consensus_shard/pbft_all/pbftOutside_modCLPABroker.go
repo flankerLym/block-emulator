@@ -21,7 +21,7 @@ func (cbom *CLPABrokerOutsideModule) HandleMessageOutsidePBFT(msgType message.Me
 	case message.CInject:
 		cbom.handleInjectTx(content)
 
-	// messages about CLPA
+	// messages about CLPA / ZK-SCAR(shared transfer pipeline)
 	case message.CPartitionMsg:
 		cbom.handlePartitionMsg(content)
 	case message.CAccountTransferMsg_broker:
@@ -65,8 +65,16 @@ func (cbom *CLPABrokerOutsideModule) handlePartitionMsg(content []byte) {
 	if err != nil {
 		log.Panic()
 	}
+	if pm.Algorithm == "" {
+		pm.Algorithm = "CLPA"
+	}
 	cbom.cdm.ModifiedMap = append(cbom.cdm.ModifiedMap, pm.PartitionModified)
-	cbom.pbftNode.pl.Plog.Printf("S%dN%d : has received partition message\n", cbom.pbftNode.ShardID, cbom.pbftNode.NodeID)
+	cbom.cdm.PartitionMeta = append(cbom.cdm.PartitionMeta, *pm)
+	for _, cap := range pm.ShadowCapsules {
+		cp := cap
+		cbom.cdm.ShadowCapsulePool[cap.Addr] = &cp
+	}
+	cbom.pbftNode.pl.Plog.Printf("S%dN%d : has received partition message, alg=%s, epochTag=%d\n", cbom.pbftNode.ShardID, cbom.pbftNode.NodeID, pm.Algorithm, pm.EpochTag)
 	cbom.cdm.PartitionOn = true
 }
 
@@ -96,6 +104,19 @@ func (cbom *CLPABrokerOutsideModule) handleAccountStateAndTxMsg(content []byte) 
 		log.Panic()
 	}
 	cbom.cdm.AccountStateTx[at.FromShard] = at
+	if at.Algorithm == "ZKSCAR" {
+		if at.RVC != nil {
+			cbom.cdm.RVCPool[at.RVC.CertificateID] = at.RVC
+		}
+		for _, cap := range at.ShadowCapsules {
+			cp := cap
+			cbom.cdm.ShadowCapsulePool[cap.Addr] = &cp
+		}
+		for _, receipt := range at.DualReceipts {
+			rc := receipt
+			cbom.cdm.DualAnchorReceiptPool[string(receipt.TxHash)] = &rc
+		}
+	}
 	cbom.pbftNode.pl.Plog.Printf("S%dN%d has added the accoutStateandTx from %d to pool\n", cbom.pbftNode.ShardID, cbom.pbftNode.NodeID, at.FromShard)
 
 	if len(cbom.cdm.AccountStateTx) == int(cbom.pbftNode.pbftChainConfig.ShardNums)-1 {

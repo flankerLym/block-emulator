@@ -20,6 +20,8 @@ type CLPAPbftInsideExtraHandleMod_forBroker struct {
 
 // propose request with different types
 func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) HandleinPropose() (bool, *message.Request) {
+	applyPendingHydration(cphm.pbftNode, cphm.cdm, cphm.cdm.AccountTransferRound)
+
 	if cphm.cdm.PartitionOn {
 		cphm.sendPartitionReady()
 		for !cphm.getPartitionReady() {

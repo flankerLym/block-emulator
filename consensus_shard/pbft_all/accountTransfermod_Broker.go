@@ -61,6 +61,8 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendAccounts_and_Txs() {
 	accountToFetch := make([]string, 0)
 	txsBeCross := make([]*core.Transaction, 0) // the transactions which will be cross-shard tx because of re-partition
 	lastMapid := len(cphm.cdm.ModifiedMap) - 1
+	meta := latestPartitionMeta(cphm.cdm)
+
 	for key, val := range cphm.cdm.ModifiedMap[lastMapid] {
 		if val != cphm.pbftNode.ShardID && cphm.pbftNode.CurChain.Get_PartitionMap(key) == cphm.pbftNode.ShardID {
 			accountToFetch = append(accountToFetch, key)
@@ -76,11 +78,45 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendAccounts_and_Txs() {
 		addrSend := make([]string, 0)
 		addrSet := make(map[string]bool)
 		asSend := make([]*core.AccountState, 0)
+		hydrationAddrs := make([]string, 0)
+		hydrationStates := make([]*core.AccountState, 0)
+		shadowCapsules := make([]message.ShadowCapsule, 0)
+
 		for idx, addr := range accountToFetch {
 			if cphm.cdm.ModifiedMap[lastMapid][addr] == i {
+				baseState := asFetched[idx]
 				addrSend = append(addrSend, addr)
 				addrSet[addr] = true
-				asSend = append(asSend, asFetched[idx])
+
+				if meta != nil && meta.Algorithm == "ZKSCAR" {
+					tmpl := templateCapsule(meta, addr)
+					debtRoot := debtRootForAddr(cphm.pbftNode.CurChain.Txpool.TxQueue, addr)
+					shadowState := baseState.BuildShadowState(meta.EpochTag, cphm.pbftNode.ShardID, i, debtRoot, "")
+					asSend = append(asSend, shadowState)
+
+					hydrationAddrs = append(hydrationAddrs, addr)
+					hydrationStates = append(hydrationStates, baseState.FinalizeHydration(meta.EpochTag))
+
+					cap := message.ShadowCapsule{
+						Addr:         addr,
+						CurrentShard: cphm.pbftNode.ShardID,
+						TargetShard:  i,
+						Balance:      baseState.Balance.String(),
+						Nonce:        baseState.Nonce,
+						CodeHash:     append([]byte(nil), baseState.CodeHash...),
+						StorageRoot:  append([]byte(nil), baseState.StorageRoot...),
+						DebtRoot:     debtRoot,
+						EpochTag:     meta.EpochTag,
+					}
+					if tmpl != nil {
+						cap.Degree = tmpl.Degree
+						cap.Hotness = tmpl.Hotness
+						cap.LocalityGain = tmpl.LocalityGain
+					}
+					shadowCapsules = append(shadowCapsules, cap)
+				} else {
+					asSend = append(asSend, baseState)
+				}
 			}
 		}
 		// fetch transactions to it, after the transactions is fetched, delete it in the pool
@@ -127,10 +163,20 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendAccounts_and_Txs() {
 
 		cphm.pbftNode.pl.Plog.Printf("The txSend to shard %d is generated \n", i)
 		ast := message.AccountStateAndTx{
-			Addrs:        addrSend,
-			AccountState: asSend,
-			FromShard:    cphm.pbftNode.ShardID,
-			Txs:          txSend,
+			Addrs:          addrSend,
+			AccountState:   asSend,
+			HydrationAddrs: hydrationAddrs,
+			HydrationState: hydrationStates,
+			ShadowCapsules: shadowCapsules,
+			FromShard:      cphm.pbftNode.ShardID,
+			Txs:            txSend,
+		}
+		if meta != nil && meta.Algorithm == "ZKSCAR" {
+			ast.Algorithm = "ZKSCAR"
+			ast.Stage = "shadow"
+			receipts := buildDualAnchorReceipts(txSend, cphm.pbftNode.ShardID, i, meta.EpochTag)
+			ast.DualReceipts = receipts
+			ast.RVC = buildBatchRVC(meta.EpochTag, cphm.pbftNode.ShardID, i, shadowCapsules)
 		}
 		aByte, err := json.Marshal(ast)
 		if err != nil {
@@ -164,12 +210,34 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) getCollectOver() bool {
 // propose a partition message
 func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) proposePartition() (bool, *message.Request) {
 	cphm.pbftNode.pl.Plog.Printf("S%dN%d : begin partition proposing\n", cphm.pbftNode.ShardID, cphm.pbftNode.NodeID)
+	receivedHydrationState := make(map[string]*core.AccountState)
+	shadowCapsules := make([]message.ShadowCapsule, 0)
+	dualReceipts := make([]message.DualAnchorReceipt, 0)
+	rvcs := make([]*message.ReshardingValidityCertificate, 0)
+	algorithm := "CLPA"
+	stage := ""
 	// add all data in pool into the set
 	for _, at := range cphm.cdm.AccountStateTx {
 		for i, addr := range at.Addrs {
 			cphm.cdm.ReceivedNewAccountState[addr] = at.AccountState[i]
 		}
+		for i, addr := range at.HydrationAddrs {
+			if i < len(at.HydrationState) {
+				receivedHydrationState[addr] = at.HydrationState[i]
+			}
+		}
 		cphm.cdm.ReceivedNewTx = append(cphm.cdm.ReceivedNewTx, at.Txs...)
+		shadowCapsules = append(shadowCapsules, at.ShadowCapsules...)
+		dualReceipts = append(dualReceipts, at.DualReceipts...)
+		if at.RVC != nil {
+			rvcs = append(rvcs, at.RVC)
+		}
+		if at.Algorithm != "" {
+			algorithm = at.Algorithm
+		}
+		if at.Stage != "" {
+			stage = at.Stage
+		}
 	}
 	// propose, send all txs to other nodes in shard
 	cphm.pbftNode.CurChain.Txpool.AddTxs2Pool(cphm.cdm.ReceivedNewTx)
@@ -180,11 +248,24 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) proposePartition() (bool, *m
 		atmaddr = append(atmaddr, key)
 		atmAs = append(atmAs, val)
 	}
+	hydAddrs := make([]string, 0)
+	hydStates := make([]*core.AccountState, 0)
+	for key, val := range receivedHydrationState {
+		hydAddrs = append(hydAddrs, key)
+		hydStates = append(hydStates, val)
+	}
 	atm := message.AccountTransferMsg{
-		ModifiedMap:  cphm.cdm.ModifiedMap[cphm.cdm.AccountTransferRound],
-		Addrs:        atmaddr,
-		AccountState: atmAs,
-		ATid:         uint64(len(cphm.cdm.ModifiedMap)),
+		ModifiedMap:    cphm.cdm.ModifiedMap[cphm.cdm.AccountTransferRound],
+		Addrs:          atmaddr,
+		AccountState:   atmAs,
+		HydrationAddrs: hydAddrs,
+		HydrationState: hydStates,
+		ShadowCapsules: shadowCapsules,
+		DualReceipts:   dualReceipts,
+		RVCs:           rvcs,
+		Algorithm:      algorithm,
+		Stage:          stage,
+		ATid:           uint64(len(cphm.cdm.ModifiedMap)),
 	}
 	atmbyte := atm.Encode()
 	r := &message.Request{
@@ -199,6 +280,9 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) proposePartition() (bool, *m
 
 // all nodes in a shard will do accout Transfer, to sync the state trie
 func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) accountTransfer_do(atm *message.AccountTransferMsg) {
+	if atm.Algorithm == "ZKSCAR" && !validateAccountTransferRVCs(atm) {
+		log.Panic("ZK-SCAR RVC validation failed")
+	}
 	// change the partition Map
 	cnt := 0
 	for key, val := range atm.ModifiedMap {
@@ -208,6 +292,30 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) accountTransfer_do(atm *mess
 	cphm.pbftNode.pl.Plog.Printf("%d key-vals are updated\n", cnt)
 	// add the account into the state trie
 	cphm.pbftNode.CurChain.AddAccounts(atm.Addrs, atm.AccountState, cphm.pbftNode.view.Load())
+
+	if atm.Algorithm == "ZKSCAR" {
+		for _, rvc := range atm.RVCs {
+			cphm.cdm.RVCPool[rvc.CertificateID] = rvc
+		}
+		for _, cap := range atm.ShadowCapsules {
+			cp := cap
+			cphm.cdm.ShadowCapsulePool[cap.Addr] = &cp
+			cphm.cdm.OwnershipTransferred[cap.Addr] = true
+			cphm.cdm.HydratedAccounts[cap.Addr] = false
+		}
+		for _, receipt := range atm.DualReceipts {
+			rc := receipt
+			cphm.cdm.DualAnchorReceiptPool[string(receipt.TxHash)] = &rc
+		}
+		for i, addr := range atm.HydrationAddrs {
+			if i >= len(atm.HydrationState) {
+				continue
+			}
+			cphm.cdm.PendingHydration[addr] = atm.HydrationState[i]
+			cphm.cdm.PendingHydrationRound[addr] = atm.ATid + uint64(params.ZKSCARHydrationDelayRounds)
+		}
+		applyPendingHydration(cphm.pbftNode, cphm.cdm, atm.ATid)
+	}
 
 	if uint64(len(cphm.cdm.ModifiedMap)) != atm.ATid {
 		cphm.cdm.ModifiedMap = append(cphm.cdm.ModifiedMap, atm.ModifiedMap)

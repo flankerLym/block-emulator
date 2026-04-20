@@ -43,6 +43,13 @@ var (
 
 	ReconfigTimeGap   = 50 // The time gap between epochs. This variable is only used in CLPA / CLPA_Broker now.
 	ReconfigAlgorithm = "" // NONE / CLPA / ZKSCAR. Empty string keeps backward-compatible behavior.
+
+	// ---- ZK-SCAR tunables ----
+	ZKSCARHotnessWeight        = 0.35
+	ZKSCARBalanceWeight        = 0.25
+	ZKSCARStabilityBias        = 1.0
+	ZKSCARMaxIterations        = 50
+	ZKSCARHydrationDelayRounds = 0
 )
 
 // network layer
@@ -75,6 +82,12 @@ type globalConfig struct {
 	DatasetFile          string `json:"DatasetFile"`
 	ReconfigTimeGap      int    `json:"ReconfigTimeGap"`
 	ReconfigAlgorithm    string `json:"ReconfigAlgorithm"`
+
+	ZKSCARHotnessWeight        float64 `json:"ZKSCARHotnessWeight"`
+	ZKSCARBalanceWeight        float64 `json:"ZKSCARBalanceWeight"`
+	ZKSCARStabilityBias        float64 `json:"ZKSCARStabilityBias"`
+	ZKSCARMaxIterations        int     `json:"ZKSCARMaxIterations"`
+	ZKSCARHydrationDelayRounds int     `json:"ZKSCARHydrationDelayRounds"`
 
 	Delay       int `json:"Delay"`
 	JitterRange int `json:"JitterRange"`
@@ -124,6 +137,21 @@ func ReadConfigFile() {
 
 	ReconfigTimeGap = config.ReconfigTimeGap
 	ReconfigAlgorithm = config.ReconfigAlgorithm
+
+	// Preserve defaults when the JSON omits these fields.
+	if config.ZKSCARHotnessWeight != 0 {
+		ZKSCARHotnessWeight = config.ZKSCARHotnessWeight
+	}
+	if config.ZKSCARBalanceWeight != 0 {
+		ZKSCARBalanceWeight = config.ZKSCARBalanceWeight
+	}
+	if config.ZKSCARStabilityBias != 0 {
+		ZKSCARStabilityBias = config.ZKSCARStabilityBias
+	}
+	if config.ZKSCARMaxIterations > 0 {
+		ZKSCARMaxIterations = config.ZKSCARMaxIterations
+	}
+	ZKSCARHydrationDelayRounds = config.ZKSCARHydrationDelayRounds
 
 	// network params
 	Delay = config.Delay
