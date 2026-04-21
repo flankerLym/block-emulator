@@ -46,6 +46,9 @@ type ReshardingValidityCertificate struct {
 	PublicInputs  []string
 	ProofBytes    []byte
 	ProofDigest   string
+
+	// 新增：显式标识这是 mock / real
+	ProofMode string
 }
 
 type DualAnchorReceipt struct {
