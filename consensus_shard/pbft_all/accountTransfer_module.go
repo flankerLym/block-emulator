@@ -166,7 +166,7 @@ func debtWitnessDigestForCapsules(capsules []message.ShadowCapsule) string {
 	return stableHashStrings(parts)
 }
 
-func freezeWitnessDigestForCapsules(epochTag, fromShard, toShard uint64, sourceStateRoot string, capsules []message.ShadowCapsule) string {
+func freezeWitnessDigestForCapsules(epochTag, fromShard, toShard uint64, sourceStateRoot, freezeStateRoot string, capsules []message.ShadowCapsule) string {
 	parts := make([]string, 0, len(capsules))
 	for _, c := range capsules {
 		parts = append(parts,
@@ -174,7 +174,8 @@ func freezeWitnessDigestForCapsules(epochTag, fromShard, toShard uint64, sourceS
 				strconv.FormatUint(epochTag, 10)+"|"+
 				strconv.FormatUint(fromShard, 10)+"|"+
 				strconv.FormatUint(toShard, 10)+"|"+
-				sourceStateRoot)
+				sourceStateRoot+"|"+
+				freezeStateRoot)
 	}
 	return stableHashStrings(parts)
 }
@@ -185,6 +186,7 @@ func expectedRVCInputs(rvc *message.ReshardingValidityCertificate) []string {
 		strconv.FormatUint(rvc.FromShard, 10),
 		strconv.FormatUint(rvc.ToShard, 10),
 		rvc.SourceStateRoot,
+		rvc.FreezeStateRoot,
 		rvc.PartitionDigest,
 		rvc.CapsuleDigest,
 		rvc.BalanceDigest,
@@ -196,13 +198,13 @@ func expectedRVCInputs(rvc *message.ReshardingValidityCertificate) []string {
 	}
 }
 
-func buildBatchRVC(epochTag, fromShard, toShard uint64, capsules []message.ShadowCapsule, sourceStateRoot string) *message.ReshardingValidityCertificate {
+func buildBatchRVC(epochTag, fromShard, toShard uint64, capsules []message.ShadowCapsule, sourceStateRoot, freezeStateRoot string) *message.ReshardingValidityCertificate {
 	capsDigest := shadowCapsuleDigest(capsules)
 	partDigest := partitionDigestForCapsules(capsules)
 	balDigest := balanceDigestForCapsules(capsules)
 	uniqueDigest := uniqueAddrDigestForCapsules(capsules)
 	debtDigest := debtWitnessDigestForCapsules(capsules)
-	freezeDigest := freezeWitnessDigestForCapsules(epochTag, fromShard, toShard, sourceStateRoot, capsules)
+	freezeDigest := freezeWitnessDigestForCapsules(epochTag, fromShard, toShard, sourceStateRoot, freezeStateRoot, capsules)
 
 	idBase := []string{
 		"ZKSCAR",
@@ -210,6 +212,7 @@ func buildBatchRVC(epochTag, fromShard, toShard uint64, capsules []message.Shado
 		strconv.FormatUint(fromShard, 10),
 		strconv.FormatUint(toShard, 10),
 		sourceStateRoot,
+		freezeStateRoot,
 		capsDigest,
 		partDigest,
 		balDigest,
@@ -232,6 +235,8 @@ func buildBatchRVC(epochTag, fromShard, toShard uint64, capsules []message.Shado
 		CertificateID:        certID,
 		SourceStateRoot:      sourceStateRoot,
 		SourceStateRootType:  "mpt-state-root",
+		FreezeStateRoot:      freezeStateRoot,
+		FreezeStateRootType:  "mpt-state-root",
 		TargetShadowRoot:     "",
 		TargetShadowRootType: "pending-shadow-root",
 		PartitionDigest:      partDigest,
@@ -263,6 +268,9 @@ func validateRVCBatch(rvc *message.ReshardingValidityCertificate, capsules []mes
 		return false
 	}
 	if rvc.SourceStateRoot == "" || rvc.SourceStateRootType == "" {
+		return false
+	}
+	if rvc.FreezeStateRoot == "" || rvc.FreezeStateRootType == "" {
 		return false
 	}
 	if uint64(len(capsules)) != rvc.BatchSize {
@@ -298,7 +306,7 @@ func validateRVCBatch(rvc *message.ReshardingValidityCertificate, capsules []mes
 	if debtWitnessDigestForCapsules(capsules) != rvc.DebtWitnessDigest {
 		return false
 	}
-	if freezeWitnessDigestForCapsules(rvc.EpochTag, rvc.FromShard, rvc.ToShard, rvc.SourceStateRoot, capsules) != rvc.FreezeWitnessDigest {
+	if freezeWitnessDigestForCapsules(rvc.EpochTag, rvc.FromShard, rvc.ToShard, rvc.SourceStateRoot, rvc.FreezeStateRoot, capsules) != rvc.FreezeWitnessDigest {
 		return false
 	}
 
@@ -782,6 +790,10 @@ func (cphm *CLPAPbftInsideExtraHandleMod) sendAccounts_and_Txs() {
 		addrSet := make(map[string]bool)
 		asSend := make([]*core.AccountState, 0)
 		shadowCapsules := make([]message.ShadowCapsule, 0)
+		sourceStateRoot := ""
+		if meta != nil && meta.Algorithm == "ZKSCAR" {
+			sourceStateRoot = stateRootHex(cphm.pbftNode.CurChain.CurrentBlock.Header.StateRoot)
+		}
 
 		for idx, addr := range accountToFetch {
 			if cphm.cdm.ModifiedMap[lastMapid][addr] == i {
@@ -835,28 +847,44 @@ func (cphm *CLPAPbftInsideExtraHandleMod) sendAccounts_and_Txs() {
 		cphm.pbftNode.CurChain.Txpool.TxQueue = cphm.pbftNode.CurChain.Txpool.TxQueue[:firstPtr]
 
 		if meta != nil && meta.Algorithm == "ZKSCAR" {
-			sourceStateRoot := stateRootHex(cphm.pbftNode.CurChain.CurrentBlock.Header.StateRoot)
-			rvc := buildBatchRVC(meta.EpochTag, cphm.pbftNode.ShardID, i, shadowCapsules, sourceStateRoot)
-			for _, cap := range shadowCapsules {
-				shadowState := cphm.cdm.SourceCustodyState[cap.Addr].BuildShadowState(meta.EpochTag, cphm.pbftNode.ShardID, i, cap.DebtRoot, rvc.CertificateID)
-				asSend = append(asSend, shadowState)
+			if len(shadowCapsules) > 0 {
+				freezeStateRoot := stateRootHex(cphm.pbftNode.CurChain.CurrentBlock.Header.StateRoot)
+				rvc := buildBatchRVC(meta.EpochTag, cphm.pbftNode.ShardID, i, shadowCapsules, sourceStateRoot, freezeStateRoot)
+				for _, cap := range shadowCapsules {
+					shadowState := cphm.cdm.SourceCustodyState[cap.Addr].BuildShadowState(meta.EpochTag, cphm.pbftNode.ShardID, i, cap.DebtRoot, rvc.CertificateID)
+					asSend = append(asSend, shadowState)
+				}
+				ast := message.AccountStateAndTx{
+					Addrs:          addrSend,
+					AccountState:   asSend,
+					ShadowCapsules: shadowCapsules,
+					FromShard:      cphm.pbftNode.ShardID,
+					Txs:            txSend,
+					Algorithm:      "ZKSCAR",
+					Stage:          "shadow",
+					DualReceipts:   buildDualAnchorReceipts(txSend, cphm.pbftNode.ShardID, i, meta.EpochTag, sourceStateRoot, rvc.CertificateID),
+					RVC:            rvc,
+				}
+				aByte, err := json.Marshal(ast)
+				if err != nil {
+					log.Panic(err)
+				}
+				networks.TcpDial(message.MergeMessage(message.AccountState_and_TX, aByte), cphm.pbftNode.ip_nodeTable[i][0])
+			} else {
+				ast := message.AccountStateAndTx{
+					Addrs:        addrSend,
+					AccountState: asSend,
+					FromShard:    cphm.pbftNode.ShardID,
+					Txs:          txSend,
+					Algorithm:    "ZKSCAR",
+					Stage:        "shadow",
+				}
+				aByte, err := json.Marshal(ast)
+				if err != nil {
+					log.Panic(err)
+				}
+				networks.TcpDial(message.MergeMessage(message.AccountState_and_TX, aByte), cphm.pbftNode.ip_nodeTable[i][0])
 			}
-			ast := message.AccountStateAndTx{
-				Addrs:          addrSend,
-				AccountState:   asSend,
-				ShadowCapsules: shadowCapsules,
-				FromShard:      cphm.pbftNode.ShardID,
-				Txs:            txSend,
-				Algorithm:      "ZKSCAR",
-				Stage:          "shadow",
-				DualReceipts:   buildDualAnchorReceipts(txSend, cphm.pbftNode.ShardID, i, meta.EpochTag, sourceStateRoot, rvc.CertificateID),
-				RVC:            rvc,
-			}
-			aByte, err := json.Marshal(ast)
-			if err != nil {
-				log.Panic(err)
-			}
-			networks.TcpDial(message.MergeMessage(message.AccountState_and_TX, aByte), cphm.pbftNode.ip_nodeTable[i][0])
 		} else {
 			ast := message.AccountStateAndTx{
 				Addrs:        addrSend,

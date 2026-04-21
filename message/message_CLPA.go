@@ -40,6 +40,8 @@ type ReshardingValidityCertificate struct {
 
 	SourceStateRoot      string
 	SourceStateRootType  string
+	FreezeStateRoot      string
+	FreezeStateRootType  string
 	TargetShadowRoot     string
 	TargetShadowRootType string
 

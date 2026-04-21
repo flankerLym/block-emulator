@@ -68,6 +68,10 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendAccounts_and_Txs() {
 		addrSet := make(map[string]bool)
 		asSend := make([]*core.AccountState, 0)
 		shadowCapsules := make([]message.ShadowCapsule, 0)
+		sourceStateRoot := ""
+		if meta != nil && meta.Algorithm == "ZKSCAR" {
+			sourceStateRoot = stateRootHex(cphm.pbftNode.CurChain.CurrentBlock.Header.StateRoot)
+		}
 
 		for idx, addr := range accountToFetch {
 			if cphm.cdm.ModifiedMap[lastMapid][addr] == i {
@@ -142,28 +146,44 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendAccounts_and_Txs() {
 		cphm.pbftNode.CurChain.Txpool.TxQueue = cphm.pbftNode.CurChain.Txpool.TxQueue[:firstPtr]
 
 		if meta != nil && meta.Algorithm == "ZKSCAR" {
-			sourceStateRoot := stateRootHex(cphm.pbftNode.CurChain.CurrentBlock.Header.StateRoot)
-			rvc := buildBatchRVC(meta.EpochTag, cphm.pbftNode.ShardID, i, shadowCapsules, sourceStateRoot)
-			for _, cap := range shadowCapsules {
-				shadowState := cphm.cdm.SourceCustodyState[cap.Addr].BuildShadowState(meta.EpochTag, cphm.pbftNode.ShardID, i, cap.DebtRoot, rvc.CertificateID)
-				asSend = append(asSend, shadowState)
+			if len(shadowCapsules) > 0 {
+				freezeStateRoot := stateRootHex(cphm.pbftNode.CurChain.CurrentBlock.Header.StateRoot)
+				rvc := buildBatchRVC(meta.EpochTag, cphm.pbftNode.ShardID, i, shadowCapsules, sourceStateRoot, freezeStateRoot)
+				for _, cap := range shadowCapsules {
+					shadowState := cphm.cdm.SourceCustodyState[cap.Addr].BuildShadowState(meta.EpochTag, cphm.pbftNode.ShardID, i, cap.DebtRoot, rvc.CertificateID)
+					asSend = append(asSend, shadowState)
+				}
+				ast := message.AccountStateAndTx{
+					Addrs:          addrSend,
+					AccountState:   asSend,
+					ShadowCapsules: shadowCapsules,
+					FromShard:      cphm.pbftNode.ShardID,
+					Txs:            txSend,
+					Algorithm:      "ZKSCAR",
+					Stage:          "shadow",
+					DualReceipts:   buildDualAnchorReceipts(txSend, cphm.pbftNode.ShardID, i, meta.EpochTag, sourceStateRoot, rvc.CertificateID),
+					RVC:            rvc,
+				}
+				aByte, err := json.Marshal(ast)
+				if err != nil {
+					log.Panic(err)
+				}
+				networks.TcpDial(message.MergeMessage(message.CAccountTransferMsg_broker, aByte), cphm.pbftNode.ip_nodeTable[i][0])
+			} else {
+				ast := message.AccountStateAndTx{
+					Addrs:        addrSend,
+					AccountState: asSend,
+					FromShard:    cphm.pbftNode.ShardID,
+					Txs:          txSend,
+					Algorithm:    "ZKSCAR",
+					Stage:        "shadow",
+				}
+				aByte, err := json.Marshal(ast)
+				if err != nil {
+					log.Panic(err)
+				}
+				networks.TcpDial(message.MergeMessage(message.CAccountTransferMsg_broker, aByte), cphm.pbftNode.ip_nodeTable[i][0])
 			}
-			ast := message.AccountStateAndTx{
-				Addrs:          addrSend,
-				AccountState:   asSend,
-				ShadowCapsules: shadowCapsules,
-				FromShard:      cphm.pbftNode.ShardID,
-				Txs:            txSend,
-				Algorithm:      "ZKSCAR",
-				Stage:          "shadow",
-				DualReceipts:   buildDualAnchorReceipts(txSend, cphm.pbftNode.ShardID, i, meta.EpochTag, sourceStateRoot, rvc.CertificateID),
-				RVC:            rvc,
-			}
-			aByte, err := json.Marshal(ast)
-			if err != nil {
-				log.Panic(err)
-			}
-			networks.TcpDial(message.MergeMessage(message.CAccountTransferMsg_broker, aByte), cphm.pbftNode.ip_nodeTable[i][0])
 		} else {
 			ast := message.AccountStateAndTx{
 				Addrs:        addrSend,
