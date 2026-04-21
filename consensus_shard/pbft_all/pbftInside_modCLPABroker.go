@@ -237,51 +237,42 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) HandleforSequentialRequest(s
 
 // sendHydrationRequests sends hydration requests for shadow capsules
 func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendHydrationRequests() {
-	// Collect shadow accounts that need hydration
-	shadowAddrs := make([]string, 0)
-	sourceShards := make(map[uint64]bool)
-
-	for addr, state := range cphm.cdm.ReceivedNewAccountState {
-		if state.IsShadow() {
-			shadowAddrs = append(shadowAddrs, addr)
-			sourceShards[state.SourceShard] = true
-		}
+	if cphm.pbftNode.NodeID != uint64(cphm.pbftNode.view.Load()) {
+		return
 	}
 
-	// For each source shard, send hydration request
-	for sourceShard := range sourceShards {
-		relevantAddrs := make([]string, 0)
-		for _, addr := range shadowAddrs {
-			if state, ok := cphm.cdm.ReceivedNewAccountState[addr]; ok && state.SourceShard == sourceShard {
-				relevantAddrs = append(relevantAddrs, addr)
-			}
+	for addr, cap := range cphm.cdm.ShadowCapsulePool {
+		if cap == nil {
+			continue
+		}
+		if cap.TargetShard != cphm.pbftNode.ShardID {
+			continue
+		}
+		if cphm.cdm.HydratedAccounts[addr] {
+			continue
+		}
+		if _, exists := cphm.cdm.PendingHydrationRequests[addr]; exists {
+			continue
 		}
 
-		if len(relevantAddrs) > 0 {
-			// Get latest RVC for this epoch
-			rvcID := ""
-			for id := range cphm.cdm.RVCPool {
-				rvcID = id
-				break
-			}
-
-			hr := message.HydrationRequest{
-				Algorithm: "ZKSCAR",
-				EpochTag:  uint64(cphm.cdm.AccountTransferRound),
-				FromShard: sourceShard,
-				ToShard:   cphm.pbftNode.ShardID,
-				Addrs:     relevantAddrs,
-				RVCID:     rvcID,
-			}
-
-			hb, err := json.Marshal(hr)
-			if err != nil {
-				log.Panic(err)
-			}
-
-			sendMsg := message.MergeMessage(message.CHydrationRequest, hb)
-			broadcastToShard(cphm.pbftNode, sourceShard, sendMsg)
-			cphm.cdm.PendingHydrationRequests[hr.RVCID] = &hr
+		req := message.HydrationRequest{
+			Addr:      cap.Addr,
+			EpochTag:  cap.EpochTag,
+			FromShard: cap.CurrentShard,
+			ToShard:   cap.TargetShard,
+			Requester: cphm.pbftNode.ShardID,
+			NeedFull:  true,
 		}
+
+		hb, err := json.Marshal(req)
+		if err != nil {
+			log.Panic(err)
+		}
+
+		sendMsg := message.MergeMessage(message.CHydrationRequest, hb)
+		for nid := uint64(0); nid < cphm.pbftNode.pbftChainConfig.Nodes_perShard; nid++ {
+			networks.TcpDial(sendMsg, cphm.pbftNode.ip_nodeTable[cap.CurrentShard][nid])
+		}
+		cphm.cdm.PendingHydrationRequests[req.Addr] = &req
 	}
 }

@@ -5,7 +5,6 @@ import (
 	"blockEmulator/core"
 	"blockEmulator/message"
 	"blockEmulator/networks"
-	"blockEmulator/params"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -77,10 +76,10 @@ func shadowCapsuleDigest(capsules []message.ShadowCapsule) string {
 	for _, c := range cp {
 		parts = append(parts,
 			c.Addr+
-				"|" + c.Balance +
-				"|" + hex.EncodeToString(c.CodeHash) +
-				"|" + hex.EncodeToString(c.StorageRoot) +
-				"|" + hex.EncodeToString(c.DebtRoot))
+				"|"+c.Balance+
+				"|"+hex.EncodeToString(c.CodeHash)+
+				"|"+hex.EncodeToString(c.StorageRoot)+
+				"|"+hex.EncodeToString(c.DebtRoot))
 	}
 	return stableHashStrings(parts)
 }
