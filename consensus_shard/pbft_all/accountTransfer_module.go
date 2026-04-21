@@ -53,13 +53,54 @@ func templateCapsule(meta *message.PartitionModifiedMap, addr string) *message.S
 	return nil
 }
 
-func debtRootForAddr(txs []*core.Transaction, addr string) []byte {
+func stateRootHex(root []byte) string {
+	if len(root) == 0 {
+		return ""
+	}
+	return hex.EncodeToString(root)
+}
+
+// debtRootForAddr builds a deterministic digest over in-flight dependencies of addr.
+// It includes both txpool transactions touching addr and any unsettled dual-anchor receipts
+// that have already been indexed for the address.
+func debtRootForAddr(txs []*core.Transaction, cdm *dataSupport.Data_supportCLPA, addr string) []byte {
 	parts := make([]string, 0)
+
 	for _, tx := range txs {
-		if string(tx.Sender) == addr || string(tx.Recipient) == addr {
-			parts = append(parts, hex.EncodeToString(tx.TxHash))
+		if tx == nil {
+			continue
+		}
+		if string(tx.Sender) == addr || string(tx.Recipient) == addr ||
+			string(tx.OriginalSender) == addr || string(tx.FinalRecipient) == addr {
+			parts = append(parts,
+				"tx|"+
+					hex.EncodeToString(tx.TxHash)+"|"+
+					string(tx.Sender)+"|"+
+					string(tx.Recipient)+"|"+
+					string(tx.OriginalSender)+"|"+
+					string(tx.FinalRecipient))
 		}
 	}
+
+	if cdm != nil {
+		if keys, ok := cdm.AddressReceiptIndex[addr]; ok {
+			for key := range keys {
+				receipt, rok := cdm.DualAnchorReceiptPool[key]
+				if !rok || receipt == nil {
+					continue
+				}
+				settled := cdm.SettledDualAnchorReceipts[key]
+				parts = append(parts,
+					"receipt|"+key+"|"+
+						receipt.Sender+"|"+
+						receipt.Recipient+"|"+
+						receipt.OldRoot+"|"+
+						receipt.ShadowRoot+"|"+
+						strconv.FormatBool(settled))
+			}
+		}
+	}
+
 	h := sha256.Sum256([]byte(stringsJoin(parts)))
 	return h[:]
 }
@@ -88,7 +129,10 @@ func shadowCapsuleDigest(capsules []message.ShadowCapsule) string {
 func partitionDigestForCapsules(capsules []message.ShadowCapsule) string {
 	parts := make([]string, 0, len(capsules))
 	for _, c := range capsules {
-		parts = append(parts, c.Addr+"|"+strconv.FormatUint(c.TargetShard, 10))
+		parts = append(parts,
+			c.Addr+"|"+
+				strconv.FormatUint(c.CurrentShard, 10)+"|"+
+				strconv.FormatUint(c.TargetShard, 10))
 	}
 	return stableHashStrings(parts)
 }
@@ -101,58 +145,144 @@ func balanceDigestForCapsules(capsules []message.ShadowCapsule) string {
 	return stableHashStrings(parts)
 }
 
-func buildMockProofDigest(proofSystem, verifierKeyID string, publicInputs []string, proofBytes []byte) string {
-	parts := []string{proofSystem, verifierKeyID}
-	parts = append(parts, publicInputs...)
-	parts = append(parts, hex.EncodeToString(proofBytes))
+func uniqueAddrDigestForCapsules(capsules []message.ShadowCapsule) string {
+	seen := make(map[string]bool)
+	parts := make([]string, 0, len(capsules))
+	for _, c := range capsules {
+		if seen[c.Addr] {
+			continue
+		}
+		seen[c.Addr] = true
+		parts = append(parts, c.Addr)
+	}
 	return stableHashStrings(parts)
 }
 
-func buildBatchRVC(epochTag, fromShard, toShard uint64, capsules []message.ShadowCapsule) *message.ReshardingValidityCertificate {
+func debtWitnessDigestForCapsules(capsules []message.ShadowCapsule) string {
+	parts := make([]string, 0, len(capsules))
+	for _, c := range capsules {
+		parts = append(parts, c.Addr+"|"+hex.EncodeToString(c.DebtRoot))
+	}
+	return stableHashStrings(parts)
+}
+
+func freezeWitnessDigestForCapsules(epochTag, fromShard, toShard uint64, sourceStateRoot string, capsules []message.ShadowCapsule) string {
+	parts := make([]string, 0, len(capsules))
+	for _, c := range capsules {
+		parts = append(parts,
+			c.Addr+"|"+
+				strconv.FormatUint(epochTag, 10)+"|"+
+				strconv.FormatUint(fromShard, 10)+"|"+
+				strconv.FormatUint(toShard, 10)+"|"+
+				sourceStateRoot)
+	}
+	return stableHashStrings(parts)
+}
+
+func expectedRVCInputs(rvc *message.ReshardingValidityCertificate) []string {
+	return []string{
+		strconv.FormatUint(rvc.EpochTag, 10),
+		strconv.FormatUint(rvc.FromShard, 10),
+		strconv.FormatUint(rvc.ToShard, 10),
+		rvc.SourceStateRoot,
+		rvc.PartitionDigest,
+		rvc.CapsuleDigest,
+		rvc.BalanceDigest,
+		rvc.UniqueAddrDigest,
+		rvc.DebtWitnessDigest,
+		rvc.FreezeWitnessDigest,
+		strconv.FormatUint(rvc.BatchSize, 10),
+		rvc.CertificateID,
+	}
+}
+
+func buildBatchRVC(epochTag, fromShard, toShard uint64, capsules []message.ShadowCapsule, sourceStateRoot string) *message.ReshardingValidityCertificate {
 	capsDigest := shadowCapsuleDigest(capsules)
 	partDigest := partitionDigestForCapsules(capsules)
 	balDigest := balanceDigestForCapsules(capsules)
+	uniqueDigest := uniqueAddrDigestForCapsules(capsules)
+	debtDigest := debtWitnessDigestForCapsules(capsules)
+	freezeDigest := freezeWitnessDigestForCapsules(epochTag, fromShard, toShard, sourceStateRoot, capsules)
+
 	idBase := []string{
 		"ZKSCAR",
 		strconv.FormatUint(epochTag, 10),
 		strconv.FormatUint(fromShard, 10),
 		strconv.FormatUint(toShard, 10),
+		sourceStateRoot,
 		capsDigest,
 		partDigest,
 		balDigest,
+		uniqueDigest,
+		debtDigest,
+		freezeDigest,
+		strconv.Itoa(len(capsules)),
 	}
 	certID := stableHashStrings(idBase)
+
 	for i := range capsules {
 		capsules[i].RVCID = certID
 	}
-	publicInputs := []string{
-		capsDigest,
-		partDigest,
-		balDigest,
-		certID,
+
+	rvc := &message.ReshardingValidityCertificate{
+		Algorithm:            "ZKSCAR",
+		EpochTag:             epochTag,
+		FromShard:            fromShard,
+		ToShard:              toShard,
+		CertificateID:        certID,
+		SourceStateRoot:      sourceStateRoot,
+		SourceStateRootType:  "mpt-state-root",
+		TargetShadowRoot:     "",
+		TargetShadowRootType: "pending-shadow-root",
+		PartitionDigest:      partDigest,
+		CapsuleDigest:        capsDigest,
+		BalanceDigest:        balDigest,
+		UniqueAddrDigest:     uniqueDigest,
+		DebtWitnessDigest:    debtDigest,
+		FreezeWitnessDigest:  freezeDigest,
+		BatchSize:            uint64(len(capsules)),
 	}
-	proofBytes := []byte(stableHashStrings(append([]string{"mock-proof"}, publicInputs...)))
-	return &message.ReshardingValidityCertificate{
-		Algorithm:       "ZKSCAR",
-		EpochTag:        epochTag,
-		FromShard:       fromShard,
-		ToShard:         toShard,
-		CertificateID:   certID,
-		PartitionDigest: partDigest,
-		CapsuleDigest:   capsDigest,
-		BalanceDigest:   balDigest,
-		ProofSystem:     "mock-groth16",
-		VerifierKeyID:   "zkscar-vk-v1",
-		PublicInputs:    publicInputs,
-		ProofBytes:      proofBytes,
-		ProofDigest:     buildMockProofDigest("mock-groth16", "zkscar-vk-v1", publicInputs, proofBytes),
-	}
+
+	publicInputs := expectedRVCInputs(rvc)
+	proofSystem, verifierKeyID, proofBytes, proofDigest, proofMode := zkBackend.BuildRVCProof(publicInputs)
+	rvc.ProofSystem = proofSystem
+	rvc.VerifierKeyID = verifierKeyID
+	rvc.PublicInputs = publicInputs
+	rvc.ProofBytes = proofBytes
+	rvc.ProofDigest = proofDigest
+	rvc.ProofMode = proofMode
+
+	return rvc
 }
 
 func validateRVCBatch(rvc *message.ReshardingValidityCertificate, capsules []message.ShadowCapsule) bool {
 	if rvc == nil {
 		return false
 	}
+	if rvc.Algorithm != "ZKSCAR" {
+		return false
+	}
+	if rvc.SourceStateRoot == "" || rvc.SourceStateRootType == "" {
+		return false
+	}
+	if uint64(len(capsules)) != rvc.BatchSize {
+		return false
+	}
+
+	seen := make(map[string]bool)
+	for _, cap := range capsules {
+		if cap.RVCID != "" && cap.RVCID != rvc.CertificateID {
+			return false
+		}
+		if cap.CurrentShard != rvc.FromShard || cap.TargetShard != rvc.ToShard || cap.EpochTag != rvc.EpochTag {
+			return false
+		}
+		if seen[cap.Addr] {
+			return false
+		}
+		seen[cap.Addr] = true
+	}
+
 	if shadowCapsuleDigest(capsules) != rvc.CapsuleDigest {
 		return false
 	}
@@ -162,25 +292,26 @@ func validateRVCBatch(rvc *message.ReshardingValidityCertificate, capsules []mes
 	if balanceDigestForCapsules(capsules) != rvc.BalanceDigest {
 		return false
 	}
-	if rvc.ProofSystem == "" || rvc.VerifierKeyID == "" {
+	if uniqueAddrDigestForCapsules(capsules) != rvc.UniqueAddrDigest {
 		return false
 	}
-	if len(rvc.PublicInputs) != 4 {
+	if debtWitnessDigestForCapsules(capsules) != rvc.DebtWitnessDigest {
 		return false
 	}
-	expectedInputs := []string{
-		rvc.CapsuleDigest,
-		rvc.PartitionDigest,
-		rvc.BalanceDigest,
-		rvc.CertificateID,
+	if freezeWitnessDigestForCapsules(rvc.EpochTag, rvc.FromShard, rvc.ToShard, rvc.SourceStateRoot, capsules) != rvc.FreezeWitnessDigest {
+		return false
+	}
+
+	expectedInputs := expectedRVCInputs(rvc)
+	if len(rvc.PublicInputs) != len(expectedInputs) {
+		return false
 	}
 	for i := range expectedInputs {
 		if rvc.PublicInputs[i] != expectedInputs[i] {
 			return false
 		}
 	}
-	expectedProofDigest := buildMockProofDigest(rvc.ProofSystem, rvc.VerifierKeyID, rvc.PublicInputs, rvc.ProofBytes)
-	return expectedProofDigest == rvc.ProofDigest
+	return zkBackend.VerifyRVCProof(rvc)
 }
 
 func validateAccountTransferRVCs(atm *message.AccountTransferMsg) bool {
@@ -210,35 +341,38 @@ func receiptKey(txHash []byte) string {
 	return hex.EncodeToString(txHash)
 }
 
-func buildDualAnchorReceipts(txs []*core.Transaction, fromShard, toShard uint64, epochTag uint64) []message.DualAnchorReceipt {
+func buildDualAnchorReceipts(txs []*core.Transaction, fromShard, toShard uint64, epochTag uint64, oldRoot string, rvcID string) []message.DualAnchorReceipt {
 	out := make([]message.DualAnchorReceipt, 0, len(txs))
 	for _, tx := range txs {
-		oldRoot := stableHashStrings([]string{
-			"old",
-			hex.EncodeToString(tx.TxHash),
-			string(tx.Sender),
-			string(tx.Recipient),
-			strconv.FormatUint(fromShard, 10),
-			strconv.FormatUint(epochTag, 10),
-		})
-		shadowRoot := stableHashStrings([]string{
-			"shadow",
-			hex.EncodeToString(tx.TxHash),
-			string(tx.Sender),
-			string(tx.Recipient),
-			strconv.FormatUint(toShard, 10),
-			strconv.FormatUint(epochTag, 10),
-		})
+		if tx == nil {
+			continue
+		}
 		out = append(out, message.DualAnchorReceipt{
-			TxHash:     append([]byte(nil), tx.TxHash...),
-			Sender:     string(tx.Sender),
-			Recipient:  string(tx.Recipient),
-			OldRoot:    oldRoot,
-			ShadowRoot: shadowRoot,
-			FromShard:  fromShard,
-			ToShard:    toShard,
-			EpochTag:   epochTag,
+			TxHash:         append([]byte(nil), tx.TxHash...),
+			Sender:         string(tx.Sender),
+			Recipient:      string(tx.Recipient),
+			OldRoot:        oldRoot,
+			ShadowRoot:     "",
+			OldRootType:    "mpt-state-root",
+			ShadowRootType: "pending-shadow-root",
+			RVCID:          rvcID,
+			FromShard:      fromShard,
+			ToShard:        toShard,
+			EpochTag:       epochTag,
 		})
+	}
+	return out
+}
+
+func bindShadowRootToReceipts(receipts []message.DualAnchorReceipt, shadowRoot string) []message.DualAnchorReceipt {
+	if len(receipts) == 0 {
+		return receipts
+	}
+	out := make([]message.DualAnchorReceipt, len(receipts))
+	copy(out, receipts)
+	for i := range out {
+		out[i].ShadowRoot = shadowRoot
+		out[i].ShadowRootType = "mpt-state-root"
 	}
 	return out
 }
@@ -345,15 +479,6 @@ func evaluateRetirementCandidatesForBlock(pbftNode *PbftConsensusNode, cdm *data
 func chunkHash(payload []byte) string {
 	h := sha256.Sum256(payload)
 	return hex.EncodeToString(h[:])
-}
-
-func buildChunkProof(commitment, hash string, idx, total uint64) string {
-	return stableHashStrings([]string{
-		commitment,
-		hash,
-		strconv.FormatUint(idx, 10),
-		strconv.FormatUint(total, 10),
-	})
 }
 
 func splitStateIntoChunks(state *core.AccountState, chunkSize uint64) ([][]byte, string, []string) {
@@ -521,6 +646,7 @@ func handleHydrationDataCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.Dat
 		}
 	}
 }
+
 func handleRetirementProofCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_supportCLPA, proof *message.RetirementProof) {
 	if !proof.Hydrated || !proof.DebtRootCleared {
 		return
@@ -843,9 +969,11 @@ func (cphm *CLPAPbftInsideExtraHandleMod) accountTransfer_do(atm *message.Accoun
 	cphm.cdm.ReceivedNewAccountState = make(map[string]*core.AccountState)
 	cphm.cdm.ReceivedNewTx = make([]*core.Transaction, 0)
 	cphm.cdm.PartitionOn = false
+
 	cphm.cdm.CollectLock.Lock()
 	cphm.cdm.CollectOver = false
 	cphm.cdm.CollectLock.Unlock()
+
 	cphm.cdm.P_ReadyLock.Lock()
 	cphm.cdm.PartitionReady = make(map[uint64]bool)
 	cphm.cdm.P_ReadyLock.Unlock()
