@@ -22,9 +22,6 @@ type CLPAPbftInsideExtraHandleMod struct {
 func (cphm *CLPAPbftInsideExtraHandleMod) HandleinPropose() (bool, *message.Request) {
 	applyPendingHydration(cphm.pbftNode, cphm.cdm, cphm.cdm.AccountTransferRound)
 
-	// Handle shadow capsule post-processing (hydration requests)
-	cphm.sendHydrationRequests()
-
 	if cphm.cdm.PartitionOn {
 		cphm.sendPartitionReady()
 		for !cphm.getPartitionReady() {
@@ -57,15 +54,15 @@ func (cphm *CLPAPbftInsideExtraHandleMod) HandleinPrePrepare(ppmsg *message.PreP
 
 	if isPartitionReq {
 		// after some checking
-		cphm.pbftNode.pl.Plog.Printf("S%dN%d : a partition block\n", cphm.pbftNode.ShardID, cphm.pbftNode.NodeID)
+		cphm.pbftNode.pl.Plog.Printf("S%dN%d : a partition block\\n", cphm.pbftNode.ShardID, cphm.pbftNode.NodeID)
 	} else {
 		// the request is a block
 		if cphm.pbftNode.CurChain.IsValidBlock(core.DecodeB(ppmsg.RequestMsg.Msg.Content)) != nil {
-			cphm.pbftNode.pl.Plog.Printf("S%dN%d : not a valid block\n", cphm.pbftNode.ShardID, cphm.pbftNode.NodeID)
+			cphm.pbftNode.pl.Plog.Printf("S%dN%d : not a valid block\\n", cphm.pbftNode.ShardID, cphm.pbftNode.NodeID)
 			return false
 		}
 	}
-	cphm.pbftNode.pl.Plog.Printf("S%dN%d : the pre-prepare message is correct, putting it into the RequestPool. \n", cphm.pbftNode.ShardID, cphm.pbftNode.NodeID)
+	cphm.pbftNode.pl.Plog.Printf("S%dN%d : the pre-prepare message is correct, putting it into the RequestPool. \\n", cphm.pbftNode.ShardID, cphm.pbftNode.NodeID)
 	cphm.pbftNode.requestPool[string(ppmsg.Digest)] = ppmsg.RequestMsg
 	// merge to be a prepare message
 	return true
@@ -89,14 +86,14 @@ func (cphm *CLPAPbftInsideExtraHandleMod) HandleinCommit(cmsg *message.Commit) b
 	}
 	// if a block request ...
 	block := core.DecodeB(r.Msg.Content)
-	cphm.pbftNode.pl.Plog.Printf("S%dN%d : adding the block %d...now height = %d \n", cphm.pbftNode.ShardID, cphm.pbftNode.NodeID, block.Header.Number, cphm.pbftNode.CurChain.CurrentBlock.Header.Number)
+	cphm.pbftNode.pl.Plog.Printf("S%dN%d : adding the block %d...now height = %d \\n", cphm.pbftNode.ShardID, cphm.pbftNode.NodeID, block.Header.Number, cphm.pbftNode.CurChain.CurrentBlock.Header.Number)
 	cphm.pbftNode.CurChain.AddBlock(block)
-	cphm.pbftNode.pl.Plog.Printf("S%dN%d : added the block %d... \n", cphm.pbftNode.ShardID, cphm.pbftNode.NodeID, block.Header.Number)
+	cphm.pbftNode.pl.Plog.Printf("S%dN%d : added the block %d... \\n", cphm.pbftNode.ShardID, cphm.pbftNode.NodeID, block.Header.Number)
 	cphm.pbftNode.CurChain.PrintBlockChain()
 
 	// now try to relay txs to other shards (for main nodes)
 	if cphm.pbftNode.NodeID == uint64(cphm.pbftNode.view.Load()) {
-		cphm.pbftNode.pl.Plog.Printf("S%dN%d : main node is trying to send relay txs at height = %d \n", cphm.pbftNode.ShardID, cphm.pbftNode.NodeID, block.Header.Number)
+		cphm.pbftNode.pl.Plog.Printf("S%dN%d : main node is trying to send relay txs at height = %d \\n", cphm.pbftNode.ShardID, cphm.pbftNode.NodeID, block.Header.Number)
 		// generate relay pool and collect txs excuted
 		cphm.pbftNode.CurChain.Txpool.RelayPool = make(map[uint64][]*core.Transaction)
 		interShardTxs := make([]*core.Transaction, 0)
@@ -152,7 +149,7 @@ func (cphm *CLPAPbftInsideExtraHandleMod) HandleinCommit(cmsg *message.Commit) b
 		}
 		msg_send := message.MergeMessage(message.CBlockInfo, bByte)
 		go networks.TcpDial(msg_send, cphm.pbftNode.ip_nodeTable[params.SupervisorShard][0])
-		cphm.pbftNode.pl.Plog.Printf("S%dN%d : sended excuted txs\n", cphm.pbftNode.ShardID, cphm.pbftNode.NodeID)
+		cphm.pbftNode.pl.Plog.Printf("S%dN%d : sended excuted txs\\n", cphm.pbftNode.ShardID, cphm.pbftNode.NodeID)
 
 		cphm.pbftNode.CurChain.Txpool.GetLocked()
 
@@ -198,7 +195,7 @@ func (cphm *CLPAPbftInsideExtraHandleMod) HandleReqestforOldSeq(*message.Request
 // the operation for sequential requests
 func (cphm *CLPAPbftInsideExtraHandleMod) HandleforSequentialRequest(som *message.SendOldMessage) bool {
 	if int(som.SeqEndHeight-som.SeqStartHeight+1) != len(som.OldRequest) {
-		cphm.pbftNode.pl.Plog.Printf("S%dN%d : the SendOldMessage message is not enough\n", cphm.pbftNode.ShardID, cphm.pbftNode.NodeID)
+		cphm.pbftNode.pl.Plog.Printf("S%dN%d : the SendOldMessage message is not enough\\n", cphm.pbftNode.ShardID, cphm.pbftNode.NodeID)
 	} else { // add the block into the node pbft blockchain
 		for height := som.SeqStartHeight; height <= som.SeqEndHeight; height++ {
 			r := som.OldRequest[height-som.SeqStartHeight]
@@ -214,46 +211,4 @@ func (cphm *CLPAPbftInsideExtraHandleMod) HandleforSequentialRequest(som *messag
 		cphm.pbftNode.CurChain.PrintBlockChain()
 	}
 	return true
-}
-
-// sendHydrationRequests sends hydration requests for shadow capsules
-func (cphm *CLPAPbftInsideExtraHandleMod) sendHydrationRequests() {
-	if cphm.pbftNode.NodeID != uint64(cphm.pbftNode.view.Load()) {
-		return
-	}
-
-	for addr, cap := range cphm.cdm.ShadowCapsulePool {
-		if cap == nil {
-			continue
-		}
-		if cap.TargetShard != cphm.pbftNode.ShardID {
-			continue
-		}
-		if cphm.cdm.HydratedAccounts[addr] {
-			continue
-		}
-		if _, exists := cphm.cdm.PendingHydrationRequests[addr]; exists {
-			continue
-		}
-
-		req := message.HydrationRequest{
-			Addr:      cap.Addr,
-			EpochTag:  cap.EpochTag,
-			FromShard: cap.CurrentShard,
-			ToShard:   cap.TargetShard,
-			Requester: cphm.pbftNode.ShardID,
-			NeedFull:  true,
-		}
-
-		hb, err := json.Marshal(req)
-		if err != nil {
-			log.Panic(err)
-		}
-
-		sendMsg := message.MergeMessage(message.CHydrationRequest, hb)
-		for nid := uint64(0); nid < cphm.pbftNode.pbftChainConfig.Nodes_perShard; nid++ {
-			networks.TcpDial(sendMsg, cphm.pbftNode.ip_nodeTable[cap.CurrentShard][nid])
-		}
-		cphm.cdm.PendingHydrationRequests[req.Addr] = &req
-	}
 }

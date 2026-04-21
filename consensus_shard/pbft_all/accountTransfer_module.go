@@ -207,6 +207,9 @@ func issueHydrationRequests(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_s
 		return
 	}
 	for _, cap := range caps {
+		if _, exists := cdm.PendingHydrationRequests[cap.Addr]; exists {
+			continue
+		}
 		req := &message.HydrationRequest{
 			Addr:      cap.Addr,
 			EpochTag:  cap.EpochTag,
@@ -220,7 +223,11 @@ func issueHydrationRequests(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_s
 		if err != nil {
 			log.Panic(err)
 		}
-		networks.TcpDial(message.MergeMessage(message.CHydrationRequest, b), pbftNode.ip_nodeTable[cap.CurrentShard][0])
+		msg := message.MergeMessage(message.CHydrationRequest, b)
+		// 广播到源 shard 的全部节点，保证所有节点都能收到请求
+		for nid := uint64(0); nid < pbftNode.pbftChainConfig.Nodes_perShard; nid++ {
+			networks.TcpDial(msg, pbftNode.ip_nodeTable[cap.CurrentShard][nid])
+		}
 	}
 }
 
@@ -246,8 +253,10 @@ func handleHydrationRequestCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.
 	if err != nil {
 		log.Panic(err)
 	}
+	msg := message.MergeMessage(message.CHydrationData, b)
+	// 广播到目标 shard 的全部节点，确保所有节点都补齐 full state
 	for nid := uint64(0); nid < pbftNode.pbftChainConfig.Nodes_perShard; nid++ {
-		networks.TcpDial(message.MergeMessage(message.CHydrationData, b), pbftNode.ip_nodeTable[req.ToShard][nid])
+		networks.TcpDial(msg, pbftNode.ip_nodeTable[req.ToShard][nid])
 	}
 }
 
@@ -263,13 +272,14 @@ func handleHydrationDataCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.Dat
 }
 
 func handleRetirementProofCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_supportCLPA, proof *message.RetirementProof) {
-	if !proof.Hydrated {
+	if !proof.Hydrated || !proof.DebtRootCleared {
 		return
 	}
 	cdm.RetirementProofPool[proof.Addr] = proof
 	cdm.RetiredAccounts[proof.Addr] = true
 	delete(cdm.SourceCustodyState, proof.Addr)
-	pbftNode.CurChain.FreezeAccount(proof.Addr, proof.EpochTag)
+	// 旧 shard 上直接删除托管副本，而不是 freeze 一个已经不再属于本 shard 的地址
+	pbftNode.CurChain.DeleteAccounts([]string{proof.Addr})
 }
 
 func maybeSendRetirementProof(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_supportCLPA, addr string, epochTag uint64) {
@@ -278,6 +288,9 @@ func maybeSendRetirementProof(pbftNode *PbftConsensusNode, cdm *dataSupport.Data
 	}
 	cap, ok := cdm.ShadowCapsulePool[addr]
 	if !ok || cap == nil {
+		return
+	}
+	if !cdm.HydratedAccounts[addr] {
 		return
 	}
 	proof := &message.RetirementProof{
@@ -293,7 +306,11 @@ func maybeSendRetirementProof(pbftNode *PbftConsensusNode, cdm *dataSupport.Data
 	if err != nil {
 		log.Panic(err)
 	}
-	networks.TcpDial(message.MergeMessage(message.CRetirementProof, b), pbftNode.ip_nodeTable[cap.CurrentShard][0])
+	msg := message.MergeMessage(message.CRetirementProof, b)
+	// 广播到源 shard 全部节点，保证所有节点都退休旧副本
+	for nid := uint64(0); nid < pbftNode.pbftChainConfig.Nodes_perShard; nid++ {
+		networks.TcpDial(msg, pbftNode.ip_nodeTable[cap.CurrentShard][nid])
+	}
 }
 
 func applyPendingHydration(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_supportCLPA, currentRound uint64) {
