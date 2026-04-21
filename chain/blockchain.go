@@ -1,6 +1,3 @@
-// Here the blockchain structrue is defined
-// each node in this system will maintain a blockchain object.
-
 package chain
 
 import (
@@ -24,19 +21,17 @@ import (
 )
 
 type BlockChain struct {
-	db           ethdb.Database      // the leveldb database to store in the disk, for status trie
-	triedb       *trie.Database      // the trie database which helps to store the status trie
-	ChainConfig  *params.ChainConfig // the chain configuration, which can help to identify the chain
-	CurrentBlock *core.Block         // the top block in this blockchain
-	Storage      *storage.Storage    // Storage is the bolt-db to store the blocks
-	Txpool       *core.TxPool        // the transaction pool
-	PartitionMap map[string]uint64   // the partition map which is defined by some algorithm can help account parition
+	db           ethdb.Database
+	triedb       *trie.Database
+	ChainConfig  *params.ChainConfig
+	CurrentBlock *core.Block
+	Storage      *storage.Storage
+	Txpool       *core.TxPool
+	PartitionMap map[string]uint64
 	pmlock       sync.RWMutex
 }
 
-// Get the transaction root, this root can be used to check the transactions
 func GetTxTreeRoot(txs []*core.Transaction) []byte {
-	// use a memory trie database to do this, instead of disk database
 	triedb := trie.NewDatabase(rawdb.NewMemoryDatabase())
 	transactionTree := trie.NewEmpty(triedb)
 	for _, tx := range txs {
@@ -45,7 +40,6 @@ func GetTxTreeRoot(txs []*core.Transaction) []byte {
 	return transactionTree.Hash().Bytes()
 }
 
-// Get bloom filter
 func GetBloomFilter(txs []*core.Transaction) *bitset.BitSet {
 	bs := bitset.New(2048)
 	for _, tx := range txs {
@@ -54,14 +48,12 @@ func GetBloomFilter(txs []*core.Transaction) *bitset.BitSet {
 	return bs
 }
 
-// Write Partition Map
 func (bc *BlockChain) Update_PartitionMap(key string, val uint64) {
 	bc.pmlock.Lock()
 	defer bc.pmlock.Unlock()
 	bc.PartitionMap[key] = val
 }
 
-// Get parition (if not exist, return default)
 func (bc *BlockChain) Get_PartitionMap(key string) uint64 {
 	bc.pmlock.RLock()
 	defer bc.pmlock.RUnlock()
@@ -71,47 +63,35 @@ func (bc *BlockChain) Get_PartitionMap(key string) uint64 {
 	return bc.PartitionMap[key]
 }
 
-// Send a transaction to the pool (need to decide which pool should be sended)
 func (bc *BlockChain) SendTx2Pool(txs []*core.Transaction) {
 	bc.Txpool.AddTxs2Pool(txs)
 }
 
-// handle transactions and modify the status trie
 func (bc *BlockChain) GetUpdateStatusTrie(txs []*core.Transaction) common.Hash {
 	fmt.Printf("The len of txs is %d\n", len(txs))
-	// the empty block (length of txs is 0) condition
 	if len(txs) == 0 {
 		return common.BytesToHash(bc.CurrentBlock.Header.StateRoot)
 	}
-	// build trie from the triedb (in disk)
 	st, err := trie.New(trie.TrieID(common.BytesToHash(bc.CurrentBlock.Header.StateRoot)), bc.triedb)
 	if err != nil {
 		log.Panic(err)
 	}
 	cnt := 0
-	// handle transactions, the signature check is ignored here
 	for i, tx := range txs {
-		// fmt.Printf("tx %d: %s, %s\n", i, tx.Sender, tx.Recipient)
-		// senderIn := false
 		if !tx.Relayed && (bc.Get_PartitionMap(tx.Sender) == bc.ChainConfig.ShardID || tx.HasBroker) {
-			// senderIn = true
-			// fmt.Printf("the sender %s is in this shard %d, \n", tx.Sender, bc.ChainConfig.ShardID)
-			// modify local accountstate
 			s_state_enc, _ := st.Get([]byte(tx.Sender))
 			var s_state *core.AccountState
 			if s_state_enc == nil {
-				// fmt.Println("missing account SENDER, now adding account")
 				ib := new(big.Int)
 				ib.Add(ib, params.Init_Balance)
-				s_state = &core.AccountState{
-					Nonce:   uint64(i),
-					Balance: ib,
-				}
+				s_state = &core.AccountState{Nonce: uint64(i), Balance: ib}
 			} else {
 				s_state = core.DecodeAS(s_state_enc)
 			}
-			s_balance := s_state.Balance
-			if s_balance.Cmp(tx.Value) == -1 {
+			if s_state.Retired {
+				continue
+			}
+			if s_state.Balance.Cmp(tx.Value) == -1 {
 				fmt.Printf("the balance is less than the transfer amount\n")
 				continue
 			}
@@ -119,44 +99,33 @@ func (bc *BlockChain) GetUpdateStatusTrie(txs []*core.Transaction) common.Hash {
 			st.Update([]byte(tx.Sender), s_state.Encode())
 			cnt++
 		}
-		// recipientIn := false
 		if bc.Get_PartitionMap(tx.Recipient) == bc.ChainConfig.ShardID || tx.HasBroker {
-			// fmt.Printf("the recipient %s is in this shard %d, \n", tx.Recipient, bc.ChainConfig.ShardID)
-			// recipientIn = true
-			// modify local state
 			r_state_enc, _ := st.Get([]byte(tx.Recipient))
 			var r_state *core.AccountState
 			if r_state_enc == nil {
-				// fmt.Println("missing account RECIPIENT, now adding account")
 				ib := new(big.Int)
 				ib.Add(ib, params.Init_Balance)
-				r_state = &core.AccountState{
-					Nonce:   uint64(i),
-					Balance: ib,
-				}
+				r_state = &core.AccountState{Nonce: uint64(i), Balance: ib}
 			} else {
 				r_state = core.DecodeAS(r_state_enc)
 			}
+			if r_state.Retired {
+				continue
+			}
 			r_state.Deposit(tx.Value)
-
-			// Justitia incentive mechanism: add rewards
 			if params.JustitiaEnabled {
-				// Add broker reward if this recipient is a broker
 				if tx.HasBroker && tx.Recipient == tx.FinalRecipient && tx.BrokerReward != nil {
 					r_state.Deposit(tx.BrokerReward)
 				}
 			}
-
 			st.Update([]byte(tx.Recipient), r_state.Encode())
 			cnt++
 		}
 	}
-	// commit the memory trie to the database in the disk
 	if cnt == 0 {
 		return common.BytesToHash(bc.CurrentBlock.Header.StateRoot)
 	}
 	rt, ns := st.Commit(false)
-	// if `ns` is nil, the `err = bc.triedb.Update(trie.NewWithNodeSet(ns))` will report an error.
 	if ns != nil {
 		err = bc.triedb.Update(trie.NewWithNodeSet(ns))
 		if err != nil {
@@ -171,10 +140,8 @@ func (bc *BlockChain) GetUpdateStatusTrie(txs []*core.Transaction) common.Hash {
 	return rt
 }
 
-// generate (mine) a block, this function return a block
 func (bc *BlockChain) GenerateBlock(miner int32) *core.Block {
 	var txs []*core.Transaction
-	// pack the transactions from the txpool
 	if params.UseBlocksizeInBytes == 1 {
 		txs = bc.Txpool.PackTxsWithBytes(params.BlocksizeInBytes)
 	} else {
@@ -188,67 +155,45 @@ func (bc *BlockChain) GenerateBlock(miner int32) *core.Block {
 		Miner:           miner,
 	}
 
-	// Initialize Justitia incentive fields
 	if params.JustitiaEnabled {
 		bh.BlockReward = new(big.Int).Set(params.BlockReward)
 		bh.CrossShardReward = new(big.Int)
 		bh.BrokerReward = new(big.Int)
-
-		// Calculate rewards for transactions
 		for _, tx := range txs {
-			// Check if this is a cross-shard transaction
 			if tx.HasBroker {
 				tx.IsCrossShard = true
-				// Add cross-shard reward
 				tx.CrossShardReward = new(big.Int).Set(params.CrossShardRewardRate)
 				bh.CrossShardReward.Add(bh.CrossShardReward, tx.CrossShardReward)
-
-				// Add broker reward
 				if tx.SenderIsBroker || tx.Recipient == tx.FinalRecipient {
 					tx.BrokerReward = new(big.Int).Set(params.BrokerRewardRate)
 					bh.BrokerReward.Add(bh.BrokerReward, tx.BrokerReward)
 				}
 			}
-
-			// Ensure minimum fee
 			if tx.Fee == nil || tx.Fee.Cmp(params.MinTxFee) < 0 {
 				tx.Fee = new(big.Int).Set(params.MinTxFee)
 			}
 		}
 	}
 
-	// handle transactions to build root
 	rt := bc.GetUpdateStatusTrie(txs)
-
 	bh.StateRoot = rt.Bytes()
 	bh.TxRoot = GetTxTreeRoot(txs)
 	bh.Bloom = *GetBloomFilter(txs)
-
 	b := core.NewBlock(bh, txs)
 	b.Hash = b.Header.Hash()
 	return b
 }
 
-// new a genisis block, this func will be invoked only once for a blockchain object
 func (bc *BlockChain) NewGenisisBlock() *core.Block {
 	body := make([]*core.Transaction, 0)
-	bh := &core.BlockHeader{
-		Number: 0,
-		Miner:  0,
-	}
-
-	// Initialize Justitia incentive fields for genesis block
+	bh := &core.BlockHeader{Number: 0, Miner: 0}
 	if params.JustitiaEnabled {
 		bh.BlockReward = new(big.Int)
 		bh.CrossShardReward = new(big.Int)
 		bh.BrokerReward = new(big.Int)
 		bh.IncentiveProof = nil
 	}
-	// build a new trie database by db
-	triedb := trie.NewDatabaseWithConfig(bc.db, &trie.Config{
-		Cache:     0,
-		Preimages: true,
-	})
+	triedb := trie.NewDatabaseWithConfig(bc.db, &trie.Config{Cache: 0, Preimages: true})
 	bc.triedb = triedb
 	statusTrie := trie.NewEmpty(triedb)
 	bh.StateRoot = statusTrie.Hash().Bytes()
@@ -259,7 +204,6 @@ func (bc *BlockChain) NewGenisisBlock() *core.Block {
 	return b
 }
 
-// add the genisis block in a blockchain
 func (bc *BlockChain) AddGenisisBlock(gb *core.Block) {
 	bc.Storage.AddBlock(gb)
 	newestHash, err := bc.Storage.GetNewestBlockHash()
@@ -273,65 +217,43 @@ func (bc *BlockChain) AddGenisisBlock(gb *core.Block) {
 	bc.CurrentBlock = curb
 }
 
-// add a block
 func (bc *BlockChain) AddBlock(b *core.Block) {
 	if b.Header.Number != bc.CurrentBlock.Header.Number+1 {
 		fmt.Println("the block height is not correct")
 		return
 	}
-
 	if !bytes.Equal(b.Header.ParentBlockHash, bc.CurrentBlock.Hash) {
 		fmt.Println("err parent block hash")
 		return
 	}
 
-	// if the treeRoot is existed in the node, the transactions is no need to be handled again
 	_, err := trie.New(trie.TrieID(common.BytesToHash(b.Header.StateRoot)), bc.triedb)
 	if err != nil {
 		rt := bc.GetUpdateStatusTrie(b.Body)
 		fmt.Println(bc.CurrentBlock.Header.Number+1, "the root = ", rt.Bytes())
-
-		// Justitia incentive mechanism: add rewards to miner
 		if params.JustitiaEnabled {
-			// Build state trie to update miner balance
 			st, err := trie.New(trie.TrieID(common.BytesToHash(rt.Bytes())), bc.triedb)
 			if err != nil {
 				log.Panic(err)
 			}
-
-			// Get miner address
 			minerAddr := utils.Int2Addr(uint64(b.Header.Miner))
 			minerStateEnc, _ := st.Get([]byte(minerAddr))
 			var minerState *core.AccountState
 			if minerStateEnc == nil {
-				// Create new account if not exists
-				minerState = &core.AccountState{
-					Nonce:   0,
-					Balance: new(big.Int),
-				}
+				minerState = &core.AccountState{Nonce: 0, Balance: new(big.Int)}
 			} else {
 				minerState = core.DecodeAS(minerStateEnc)
 			}
-
-			// Add block reward
 			if b.Header.BlockReward != nil {
 				minerState.Deposit(b.Header.BlockReward)
 			}
-
-			// Add cross-shard transaction reward
 			if b.Header.CrossShardReward != nil {
 				minerState.Deposit(b.Header.CrossShardReward)
 			}
-
-			// Add broker reward
 			if b.Header.BrokerReward != nil {
 				minerState.Deposit(b.Header.BrokerReward)
 			}
-
-			// Update miner state
 			st.Update([]byte(minerAddr), minerState.Encode())
-
-			// Commit state changes
 			newRt, ns := st.Commit(false)
 			if ns != nil {
 				err = bc.triedb.Update(trie.NewWithNodeSet(ns))
@@ -349,8 +271,6 @@ func (bc *BlockChain) AddBlock(b *core.Block) {
 	bc.Storage.AddBlock(b)
 }
 
-// new a blockchain.
-// the ChainConfig is pre-defined to identify the blockchain; the db is the status trie database in disk
 func NewBlockChain(cc *params.ChainConfig, db ethdb.Database) (*BlockChain, error) {
 	fmt.Println("Generating a new blockchain", db)
 	chainDBfp := params.DatabaseWrite_path + fmt.Sprintf("chainDB/S%d_N%d", cc.ShardID, cc.NodeID)
@@ -364,8 +284,6 @@ func NewBlockChain(cc *params.ChainConfig, db ethdb.Database) (*BlockChain, erro
 	curHash, err := bc.Storage.GetNewestBlockHash()
 	if err != nil {
 		fmt.Println("There is no existed blockchain in the database. ")
-		// if the Storage bolt database cannot find the newest blockhash,
-		// it means the blockchain should be built in height = 0
 		if err.Error() == "cannot find the newest block hash" {
 			genisisBlock := bc.NewGenisisBlock()
 			bc.AddGenisisBlock(genisisBlock)
@@ -375,7 +293,6 @@ func NewBlockChain(cc *params.ChainConfig, db ethdb.Database) (*BlockChain, erro
 		log.Panic()
 	}
 
-	// there is a blockchain in the storage
 	fmt.Println("Existing blockchain found")
 	curb, err := bc.Storage.GetBlock(curHash)
 	if err != nil {
@@ -383,12 +300,8 @@ func NewBlockChain(cc *params.ChainConfig, db ethdb.Database) (*BlockChain, erro
 	}
 
 	bc.CurrentBlock = curb
-	triedb := trie.NewDatabaseWithConfig(db, &trie.Config{
-		Cache:     0,
-		Preimages: true,
-	})
+	triedb := trie.NewDatabaseWithConfig(db, &trie.Config{Cache: 0, Preimages: true})
 	bc.triedb = triedb
-	// check the existence of the trie database
 	_, err = trie.New(trie.TrieID(common.BytesToHash(curb.Header.StateRoot)), triedb)
 	if err != nil {
 		log.Panic()
@@ -398,7 +311,6 @@ func NewBlockChain(cc *params.ChainConfig, db ethdb.Database) (*BlockChain, erro
 	return bc, nil
 }
 
-// check a block is valid or not in this blockchain config
 func (bc *BlockChain) IsValidBlock(b *core.Block) error {
 	if string(b.Header.ParentBlockHash) != string(bc.CurrentBlock.Hash) {
 		fmt.Println("the parentblock hash is not equal to the current block hash")
@@ -410,57 +322,40 @@ func (bc *BlockChain) IsValidBlock(b *core.Block) error {
 	return nil
 }
 
-// add accounts
-func (bc *BlockChain) AddAccounts(ac []string, as []*core.AccountState, miner int32) {
-	fmt.Printf("The len of accounts is %d, now adding the accounts\n", len(ac))
+func (bc *BlockChain) commitStateTrie(st *trie.Trie) []byte {
+	rt := bc.CurrentBlock.Header.StateRoot
+	rrt, ns := st.Commit(false)
+	if ns != nil {
+		err := bc.triedb.Update(trie.NewWithNodeSet(ns))
+		if err != nil {
+			log.Panic(err)
+		}
+		err = bc.triedb.Commit(rrt, false)
+		if err != nil {
+			log.Panic(err)
+		}
+		rt = rrt.Bytes()
+	}
+	return rt
+}
 
+func (bc *BlockChain) buildEmptyStateBlock(rt []byte) {
+	emptyTxs := make([]*core.Transaction, 0)
 	bh := &core.BlockHeader{
 		ParentBlockHash: bc.CurrentBlock.Hash,
 		Number:          bc.CurrentBlock.Header.Number + 1,
 		Time:            time.Time{},
+		StateRoot:       rt,
+		TxRoot:          GetTxTreeRoot(emptyTxs),
+		Bloom:           *GetBloomFilter(emptyTxs),
+		Miner:           0,
 	}
-	// handle transactions to build root
-	rt := bc.CurrentBlock.Header.StateRoot
-	if len(ac) != 0 {
-		st, err := trie.New(trie.TrieID(common.BytesToHash(bc.CurrentBlock.Header.StateRoot)), bc.triedb)
-		if err != nil {
-			log.Panic(err)
-		}
-		for i, addr := range ac {
-			if bc.Get_PartitionMap(addr) == bc.ChainConfig.ShardID {
-				st.Update([]byte(addr), as[i].Encode())
-			}
-		}
-
-		rrt, ns := st.Commit(false)
-
-		// if `ns` is nil, the `err = bc.triedb.Update(trie.NewWithNodeSet(ns))` will report an error.
-		if ns != nil {
-			err = bc.triedb.Update(trie.NewWithNodeSet(ns))
-			if err != nil {
-				log.Panic(err)
-			}
-			err = bc.triedb.Commit(rrt, false)
-			if err != nil {
-				log.Panic(err)
-			}
-			rt = rrt.Bytes()
-		}
-	}
-
-	emptyTxs := make([]*core.Transaction, 0)
-	bh.StateRoot = rt
-	bh.TxRoot = GetTxTreeRoot(emptyTxs)
-	bh.Bloom = *GetBloomFilter(emptyTxs)
-	bh.Miner = 0
 	b := core.NewBlock(bh, emptyTxs)
 	b.Hash = b.Header.Hash()
-
 	bc.CurrentBlock = b
 	bc.Storage.AddBlock(b)
 }
 
-// GetAccountState retrieves the full account state from the trie
 func (bc *BlockChain) GetAccountState(addr string) *core.AccountState {
 	st, err := trie.New(trie.TrieID(common.BytesToHash(bc.CurrentBlock.Header.StateRoot)), bc.triedb)
 	if err != nil {
@@ -468,66 +363,42 @@ func (bc *BlockChain) GetAccountState(addr string) *core.AccountState {
 	}
 	asenc, _ := st.Get([]byte(addr))
 	if asenc == nil {
-		return nil
+		ib := new(big.Int)
+		ib.Add(ib, params.Init_Balance)
+		return &core.AccountState{Nonce: 0, Balance: ib}
 	}
 	return core.DecodeAS(asenc)
 }
 
-// PutAccountState stores the full account state into the trie
 func (bc *BlockChain) PutAccountState(addr string, as *core.AccountState) {
-	st, err := trie.New(trie.TrieID(common.BytesToHash(bc.CurrentBlock.Header.StateRoot)), bc.triedb)
-	if err != nil {
-		log.Panic(err)
-	}
-	st.Update([]byte(addr), as.Encode())
-	rrt, ns := st.Commit(false)
-	if ns != nil {
-		err = bc.triedb.Update(trie.NewWithNodeSet(ns))
-		if err != nil {
-			log.Panic(err)
-		}
-		err = bc.triedb.Commit(rrt, false)
-		if err != nil {
-			log.Panic(err)
-		}
-		// Update current block state root
-		bh := bc.CurrentBlock.Header
-		bh.StateRoot = rrt.Bytes()
-		bc.CurrentBlock.Header = bh
-	}
+	bc.PutAccountStates([]string{addr}, []*core.AccountState{as})
 }
 
-// PutAccountStates stores multiple account states into the trie
-func (bc *BlockChain) PutAccountStates(addrs []string, states []*core.AccountState) {
-	if len(addrs) != len(states) {
-		log.Panic("PutAccountStates: addrs and states length mismatch")
+func (bc *BlockChain) PutAccountStates(ac []string, as []*core.AccountState) {
+	if len(ac) == 0 {
+		return
 	}
 	st, err := trie.New(trie.TrieID(common.BytesToHash(bc.CurrentBlock.Header.StateRoot)), bc.triedb)
 	if err != nil {
 		log.Panic(err)
 	}
-	for i, addr := range addrs {
-		st.Update([]byte(addr), states[i].Encode())
-	}
-	rrt, ns := st.Commit(false)
-	if ns != nil {
-		err = bc.triedb.Update(trie.NewWithNodeSet(ns))
-		if err != nil {
-			log.Panic(err)
+	for i, addr := range ac {
+		if i >= len(as) || as[i] == nil {
+			continue
 		}
-		err = bc.triedb.Commit(rrt, false)
-		if err != nil {
-			log.Panic(err)
+		if bc.Get_PartitionMap(addr) != bc.ChainConfig.ShardID {
+			continue
 		}
-		// Update current block state root
-		bh := bc.CurrentBlock.Header
-		bh.StateRoot = rrt.Bytes()
-		bc.CurrentBlock.Header = bh
+		st.Update([]byte(addr), as[i].Encode())
 	}
+	rt := bc.commitStateTrie(st)
+	bc.buildEmptyStateBlock(rt)
 }
 
-// DeleteAccounts removes accounts from the trie
 func (bc *BlockChain) DeleteAccounts(addrs []string) {
+	if len(addrs) == 0 {
+		return
+	}
 	st, err := trie.New(trie.TrieID(common.BytesToHash(bc.CurrentBlock.Header.StateRoot)), bc.triedb)
 	if err != nil {
 		log.Panic(err)
@@ -535,59 +406,40 @@ func (bc *BlockChain) DeleteAccounts(addrs []string) {
 	for _, addr := range addrs {
 		st.Delete([]byte(addr))
 	}
-	rrt, ns := st.Commit(false)
-	if ns != nil {
-		err = bc.triedb.Update(trie.NewWithNodeSet(ns))
-		if err != nil {
-			log.Panic(err)
-		}
-		err = bc.triedb.Commit(rrt, false)
-		if err != nil {
-			log.Panic(err)
-		}
-		// Update current block state root
-		bh := bc.CurrentBlock.Header
-		bh.StateRoot = rrt.Bytes()
-		bc.CurrentBlock.Header = bh
-	}
+	rt := bc.commitStateTrie(st)
+	bc.buildEmptyStateBlock(rt)
 }
 
-// FreezeAccount marks an account as retired/frozen
 func (bc *BlockChain) FreezeAccount(addr string, epochTag uint64) {
+	state := bc.GetAccountState(addr)
+	if state == nil {
+		return
+	}
+	frozen := state.BuildRetiredCopy(epochTag)
+	bc.PutAccountState(addr, frozen)
+}
+
+func (bc *BlockChain) AddAccounts(ac []string, as []*core.AccountState, miner int32) {
+	fmt.Printf("The len of accounts is %d, now adding the accounts\n", len(ac))
+	if len(ac) == 0 {
+		return
+	}
 	st, err := trie.New(trie.TrieID(common.BytesToHash(bc.CurrentBlock.Header.StateRoot)), bc.triedb)
 	if err != nil {
 		log.Panic(err)
 	}
-	asenc, _ := st.Get([]byte(addr))
-	if asenc == nil {
-		return
-	}
-	as := core.DecodeAS(asenc)
-	retired := as.BuildRetiredCopy(epochTag)
-	st.Update([]byte(addr), retired.Encode())
-	rrt, ns := st.Commit(false)
-	if ns != nil {
-		err = bc.triedb.Update(trie.NewWithNodeSet(ns))
-		if err != nil {
-			log.Panic(err)
+	for i, addr := range ac {
+		if i >= len(as) || as[i] == nil {
+			continue
 		}
-		err = bc.triedb.Commit(rrt, false)
-		if err != nil {
-			log.Panic(err)
+		if bc.Get_PartitionMap(addr) == bc.ChainConfig.ShardID {
+			st.Update([]byte(addr), as[i].Encode())
 		}
-		// Update current block state root
-		bh := bc.CurrentBlock.Header
-		bh.StateRoot = rrt.Bytes()
-		bc.CurrentBlock.Header = bh
 	}
+	rt := bc.commitStateTrie(st)
+	bc.buildEmptyStateBlock(rt)
 }
 
-// UpsertAccountsFull is an alias for PutAccountStates for compatibility
-func (bc *BlockChain) UpsertAccountsFull(addrs []string, states []*core.AccountState) {
-	bc.PutAccountStates(addrs, states)
-}
-
-// fetch accounts
 func (bc *BlockChain) FetchAccounts(addrs []string) []*core.AccountState {
 	res := make([]*core.AccountState, 0)
 	st, err := trie.New(trie.TrieID(common.BytesToHash(bc.CurrentBlock.Header.StateRoot)), bc.triedb)
@@ -600,10 +452,7 @@ func (bc *BlockChain) FetchAccounts(addrs []string) []*core.AccountState {
 		if asenc == nil {
 			ib := new(big.Int)
 			ib.Add(ib, params.Init_Balance)
-			state_a = &core.AccountState{
-				Nonce:   uint64(0),
-				Balance: ib,
-			}
+			state_a = &core.AccountState{Nonce: 0, Balance: ib}
 		} else {
 			state_a = core.DecodeAS(asenc)
 		}
@@ -612,14 +461,12 @@ func (bc *BlockChain) FetchAccounts(addrs []string) []*core.AccountState {
 	return res
 }
 
-// close a blockChain, close the database inferfaces
 func (bc *BlockChain) CloseBlockChain() {
 	bc.Storage.DataBase.Close()
 	bc.triedb.CommitPreimages()
 	bc.db.Close()
 }
 
-// print the details of a blockchain
 func (bc *BlockChain) PrintBlockChain() string {
 	vals := []interface{}{
 		bc.CurrentBlock.Header.Number,
@@ -627,7 +474,6 @@ func (bc *BlockChain) PrintBlockChain() string {
 		bc.CurrentBlock.Header.StateRoot,
 		bc.CurrentBlock.Header.Time,
 		bc.triedb,
-		// len(bc.Txpool.RelayPool[1]),
 	}
 	res := fmt.Sprintf("%v\n", vals)
 	fmt.Println(res)

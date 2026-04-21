@@ -1,6 +1,3 @@
-// Account, AccountState
-// Some basic operation about accountState
-
 package core
 
 import (
@@ -17,15 +14,13 @@ type Account struct {
 	PublicKey []byte
 }
 
-// AccoutState record the details of an account, it will be saved in status trie
 type AccountState struct {
-	AcAddress   utils.Address // this part is not useful, abort
+	AcAddress   utils.Address
 	Nonce       uint64
 	Balance     *big.Int
-	StorageRoot []byte // only for smart contract account
-	CodeHash    []byte // only for smart contract account
+	StorageRoot []byte
+	CodeHash    []byte
 
-	// ---- ZK-SCAR metadata ----
 	DebtRoot             []byte
 	EpochTag             uint64
 	OwnershipTransferred bool
@@ -34,6 +29,7 @@ type AccountState struct {
 	SourceShard          uint64
 	TargetShard          uint64
 	LastRVC              string
+	Retired              bool
 }
 
 func cloneBigInt(v *big.Int) *big.Int {
@@ -70,10 +66,22 @@ func (as *AccountState) Clone() *AccountState {
 		SourceShard:          as.SourceShard,
 		TargetShard:          as.TargetShard,
 		LastRVC:              as.LastRVC,
+		Retired:              as.Retired,
 	}
 }
 
-// BuildShadowState constructs the "ownership-transferred but not fully hydrated" state.
+func (as *AccountState) IsShadow() bool {
+	return as != nil && as.OwnershipTransferred && as.PendingHydration && !as.Hydrated && !as.Retired
+}
+
+func (as *AccountState) IsHydrated() bool {
+	return as != nil && as.Hydrated && !as.PendingHydration && !as.Retired
+}
+
+func (as *AccountState) CanExecuteAsShadow() bool {
+	return as != nil && as.OwnershipTransferred && !as.Retired
+}
+
 func (as *AccountState) BuildShadowState(epochTag, sourceShard, targetShard uint64, debtRoot []byte, rvcID string) *AccountState {
 	shadow := as.Clone()
 	shadow.DebtRoot = cloneBytes(debtRoot)
@@ -84,19 +92,57 @@ func (as *AccountState) BuildShadowState(epochTag, sourceShard, targetShard uint
 	shadow.SourceShard = sourceShard
 	shadow.TargetShard = targetShard
 	shadow.LastRVC = rvcID
+	shadow.Retired = false
 	return shadow
 }
 
-// FinalizeHydration marks the state as fully hydrated.
 func (as *AccountState) FinalizeHydration(epochTag uint64) *AccountState {
 	full := as.Clone()
 	full.EpochTag = epochTag
 	full.PendingHydration = false
 	full.Hydrated = true
+	full.Retired = false
 	return full
 }
 
-// Reduce the balance of an account
+func (as *AccountState) ApplyHydration(full *AccountState, epochTag uint64) *AccountState {
+	if as == nil && full == nil {
+		return nil
+	}
+	if as == nil {
+		return full.FinalizeHydration(epochTag)
+	}
+	if full == nil {
+		cp := as.Clone()
+		cp.EpochTag = epochTag
+		cp.PendingHydration = false
+		cp.Hydrated = true
+		cp.Retired = false
+		return cp
+	}
+	res := full.Clone()
+	res.DebtRoot = cloneBytes(as.DebtRoot)
+	res.EpochTag = epochTag
+	res.OwnershipTransferred = true
+	res.PendingHydration = false
+	res.Hydrated = true
+	res.SourceShard = as.SourceShard
+	res.TargetShard = as.TargetShard
+	res.LastRVC = as.LastRVC
+	res.Retired = false
+	return res
+}
+
+func (as *AccountState) BuildRetiredCopy(epochTag uint64) *AccountState {
+	ret := as.Clone()
+	ret.EpochTag = epochTag
+	ret.PendingHydration = false
+	ret.Hydrated = false
+	ret.OwnershipTransferred = false
+	ret.Retired = true
+	return ret
+}
+
 func (as *AccountState) Deduct(val *big.Int) bool {
 	if as.Balance.Cmp(val) < 0 {
 		return false
@@ -105,12 +151,10 @@ func (as *AccountState) Deduct(val *big.Int) bool {
 	return true
 }
 
-// Increase the balance of an account
 func (s *AccountState) Deposit(value *big.Int) {
 	s.Balance.Add(s.Balance, value)
 }
 
-// Encode AccountState in order to store in the MPT
 func (as *AccountState) Encode() []byte {
 	var buff bytes.Buffer
 	encoder := gob.NewEncoder(&buff)
@@ -121,10 +165,8 @@ func (as *AccountState) Encode() []byte {
 	return buff.Bytes()
 }
 
-// Decode AccountState
 func DecodeAS(b []byte) *AccountState {
 	var as AccountState
-
 	decoder := gob.NewDecoder(bytes.NewReader(b))
 	err := decoder.Decode(&as)
 	if err != nil {
@@ -133,48 +175,7 @@ func DecodeAS(b []byte) *AccountState {
 	return &as
 }
 
-// Hash AccountState for computing the MPT Root
 func (as *AccountState) Hash() []byte {
 	h := sha256.Sum256(as.Encode())
 	return h[:]
-}
-
-// IsShadow returns true if the account is in shadow state (ownership transferred but not hydrated)
-func (as *AccountState) IsShadow() bool {
-	return as.OwnershipTransferred && !as.Hydrated && as.PendingHydration
-}
-
-// IsHydrated returns true if the account is fully hydrated
-func (as *AccountState) IsHydrated() bool {
-	return as.Hydrated && !as.PendingHydration
-}
-
-// CanExecuteAsShadow returns true if the account can execute transactions in shadow state
-func (as *AccountState) CanExecuteAsShadow() bool {
-	return as.OwnershipTransferred && (as.Hydrated || as.PendingHydration)
-}
-
-// ApplyHydration applies the full state hydration to the shadow account
-func (as *AccountState) ApplyHydration(fullState *AccountState) {
-	if !as.IsShadow() {
-		return
-	}
-	// Copy full state data
-	as.Nonce = fullState.Nonce
-	as.Balance = cloneBigInt(fullState.Balance)
-	as.StorageRoot = cloneBytes(fullState.StorageRoot)
-	as.CodeHash = cloneBytes(fullState.CodeHash)
-	// Update hydration status
-	as.Hydrated = true
-	as.PendingHydration = false
-}
-
-// BuildRetiredCopy builds a retired copy of the account
-func (as *AccountState) BuildRetiredCopy(epochTag uint64) *AccountState {
-	retired := as.Clone()
-	retired.EpochTag = epochTag
-	retired.OwnershipTransferred = false
-	retired.Hydrated = false
-	retired.PendingHydration = false
-	return retired
 }
