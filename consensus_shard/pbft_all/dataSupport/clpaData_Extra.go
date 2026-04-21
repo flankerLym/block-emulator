@@ -30,6 +30,11 @@ type Data_supportCLPA struct {
 	PendingHydrationRequests map[string]*message.HydrationRequest
 	PendingHydrationData     map[string]*message.HydrationData
 
+	PendingHydrationChunks      map[string]map[uint64][]byte
+	PendingHydrationChunkTotal  map[string]uint64
+	PendingHydrationCommitments map[string]string
+	PendingHydrationChunkSize   uint64
+
 	RVCPool               map[string]*message.ReshardingValidityCertificate
 	DualAnchorReceiptPool map[string]*message.DualAnchorReceipt
 	ShadowCapsulePool     map[string]*message.ShadowCapsule
@@ -41,25 +46,29 @@ type Data_supportCLPA struct {
 
 func NewCLPADataSupport() *Data_supportCLPA {
 	return &Data_supportCLPA{
-		ModifiedMap:              make([]map[string]uint64, 0),
-		PartitionMeta:            make([]message.PartitionModifiedMap, 0),
-		AccountTransferRound:     0,
-		ReceivedNewAccountState:  make(map[string]*core.AccountState),
-		ReceivedNewTx:            make([]*core.Transaction, 0),
-		AccountStateTx:           make(map[uint64]*message.AccountStateAndTx),
-		PartitionOn:              false,
-		PartitionReady:           make(map[uint64]bool),
-		CollectOver:              false,
-		ReadySeq:                 make(map[uint64]uint64),
-		OwnershipTransferred:     make(map[string]bool),
-		HydratedAccounts:         make(map[string]bool),
-		PendingHydrationRequests: make(map[string]*message.HydrationRequest),
-		PendingHydrationData:     make(map[string]*message.HydrationData),
-		RVCPool:                  make(map[string]*message.ReshardingValidityCertificate),
-		DualAnchorReceiptPool:    make(map[string]*message.DualAnchorReceipt),
-		ShadowCapsulePool:        make(map[string]*message.ShadowCapsule),
-		RetirementProofPool:      make(map[string]*message.RetirementProof),
-		SourceCustodyState:       make(map[string]*core.AccountState),
-		RetiredAccounts:          make(map[string]bool),
+		ModifiedMap:                 make([]map[string]uint64, 0),
+		PartitionMeta:               make([]message.PartitionModifiedMap, 0),
+		AccountTransferRound:        0,
+		ReceivedNewAccountState:     make(map[string]*core.AccountState),
+		ReceivedNewTx:               make([]*core.Transaction, 0),
+		AccountStateTx:              make(map[uint64]*message.AccountStateAndTx),
+		PartitionOn:                 false,
+		PartitionReady:              make(map[uint64]bool),
+		CollectOver:                 false,
+		ReadySeq:                    make(map[uint64]uint64),
+		OwnershipTransferred:        make(map[string]bool),
+		HydratedAccounts:            make(map[string]bool),
+		PendingHydrationRequests:    make(map[string]*message.HydrationRequest),
+		PendingHydrationData:        make(map[string]*message.HydrationData),
+		PendingHydrationChunks:      make(map[string]map[uint64][]byte),
+		PendingHydrationChunkTotal:  make(map[string]uint64),
+		PendingHydrationCommitments: make(map[string]string),
+		PendingHydrationChunkSize:   128,
+		RVCPool:                     make(map[string]*message.ReshardingValidityCertificate),
+		DualAnchorReceiptPool:       make(map[string]*message.DualAnchorReceipt),
+		ShadowCapsulePool:           make(map[string]*message.ShadowCapsule),
+		RetirementProofPool:         make(map[string]*message.RetirementProof),
+		SourceCustodyState:          make(map[string]*core.AccountState),
+		RetiredAccounts:             make(map[string]bool),
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"log"
 	"sort"
+	"strconv"
 	"time"
 )
 
@@ -87,7 +88,7 @@ func shadowCapsuleDigest(capsules []message.ShadowCapsule) string {
 func partitionDigestForCapsules(capsules []message.ShadowCapsule) string {
 	parts := make([]string, 0, len(capsules))
 	for _, c := range capsules {
-		parts = append(parts, c.Addr+"|"+hex.EncodeToString([]byte{byte(c.TargetShard)}))
+		parts = append(parts, c.Addr+"|"+strconv.FormatUint(c.TargetShard, 10))
 	}
 	return stableHashStrings(parts)
 }
@@ -95,8 +96,15 @@ func partitionDigestForCapsules(capsules []message.ShadowCapsule) string {
 func balanceDigestForCapsules(capsules []message.ShadowCapsule) string {
 	parts := make([]string, 0, len(capsules))
 	for _, c := range capsules {
-		parts = append(parts, c.Addr+"|"+c.Balance+"|"+hex.EncodeToString([]byte{byte(c.Nonce)}))
+		parts = append(parts, c.Addr+"|"+c.Balance+"|"+strconv.FormatUint(c.Nonce, 10))
 	}
+	return stableHashStrings(parts)
+}
+
+func buildMockProofDigest(proofSystem, verifierKeyID string, publicInputs []string, proofBytes []byte) string {
+	parts := []string{proofSystem, verifierKeyID}
+	parts = append(parts, publicInputs...)
+	parts = append(parts, hex.EncodeToString(proofBytes))
 	return stableHashStrings(parts)
 }
 
@@ -106,9 +114,9 @@ func buildBatchRVC(epochTag, fromShard, toShard uint64, capsules []message.Shado
 	balDigest := balanceDigestForCapsules(capsules)
 	idBase := []string{
 		"ZKSCAR",
-		hex.EncodeToString([]byte{byte(epochTag)}),
-		hex.EncodeToString([]byte{byte(fromShard)}),
-		hex.EncodeToString([]byte{byte(toShard)}),
+		strconv.FormatUint(epochTag, 10),
+		strconv.FormatUint(fromShard, 10),
+		strconv.FormatUint(toShard, 10),
 		capsDigest,
 		partDigest,
 		balDigest,
@@ -117,6 +125,13 @@ func buildBatchRVC(epochTag, fromShard, toShard uint64, capsules []message.Shado
 	for i := range capsules {
 		capsules[i].RVCID = certID
 	}
+	publicInputs := []string{
+		capsDigest,
+		partDigest,
+		balDigest,
+		certID,
+	}
+	proofBytes := []byte(stableHashStrings(append([]string{"mock-proof"}, publicInputs...)))
 	return &message.ReshardingValidityCertificate{
 		Algorithm:       "ZKSCAR",
 		EpochTag:        epochTag,
@@ -126,7 +141,11 @@ func buildBatchRVC(epochTag, fromShard, toShard uint64, capsules []message.Shado
 		PartitionDigest: partDigest,
 		CapsuleDigest:   capsDigest,
 		BalanceDigest:   balDigest,
-		Proof:           "pseudo-rvc:" + certID,
+		ProofSystem:     "mock-groth16",
+		VerifierKeyID:   "zkscar-vk-v1",
+		PublicInputs:    publicInputs,
+		ProofBytes:      proofBytes,
+		ProofDigest:     buildMockProofDigest("mock-groth16", "zkscar-vk-v1", publicInputs, proofBytes),
 	}
 }
 
@@ -143,7 +162,25 @@ func validateRVCBatch(rvc *message.ReshardingValidityCertificate, capsules []mes
 	if balanceDigestForCapsules(capsules) != rvc.BalanceDigest {
 		return false
 	}
-	return true
+	if rvc.ProofSystem == "" || rvc.VerifierKeyID == "" {
+		return false
+	}
+	if len(rvc.PublicInputs) != 4 {
+		return false
+	}
+	expectedInputs := []string{
+		rvc.CapsuleDigest,
+		rvc.PartitionDigest,
+		rvc.BalanceDigest,
+		rvc.CertificateID,
+	}
+	for i := range expectedInputs {
+		if rvc.PublicInputs[i] != expectedInputs[i] {
+			return false
+		}
+	}
+	expectedProofDigest := buildMockProofDigest(rvc.ProofSystem, rvc.VerifierKeyID, rvc.PublicInputs, rvc.ProofBytes)
+	return expectedProofDigest == rvc.ProofDigest
 }
 
 func validateAccountTransferRVCs(atm *message.AccountTransferMsg) bool {
@@ -177,16 +214,16 @@ func buildDualAnchorReceipts(txs []*core.Transaction, fromShard, toShard uint64,
 			hex.EncodeToString(tx.TxHash),
 			tx.Sender,
 			tx.Recipient,
-			hex.EncodeToString([]byte{byte(fromShard)}),
-			hex.EncodeToString([]byte{byte(epochTag)}),
+			strconv.FormatUint(fromShard, 10),
+			strconv.FormatUint(epochTag, 10),
 		})
 		shadowRoot := stableHashStrings([]string{
 			"shadow",
 			hex.EncodeToString(tx.TxHash),
 			tx.Sender,
 			tx.Recipient,
-			hex.EncodeToString([]byte{byte(toShard)}),
-			hex.EncodeToString([]byte{byte(epochTag)}),
+			strconv.FormatUint(toShard, 10),
+			strconv.FormatUint(epochTag, 10),
 		})
 		out = append(out, message.DualAnchorReceipt{
 			TxHash:     append([]byte(nil), tx.TxHash...),
@@ -202,6 +239,74 @@ func buildDualAnchorReceipts(txs []*core.Transaction, fromShard, toShard uint64,
 	return out
 }
 
+func chunkHash(payload []byte) string {
+	h := sha256.Sum256(payload)
+	return hex.EncodeToString(h[:])
+}
+
+func buildChunkProof(commitment, hash string, idx, total uint64) string {
+	return stableHashStrings([]string{
+		commitment,
+		hash,
+		strconv.FormatUint(idx, 10),
+		strconv.FormatUint(total, 10),
+	})
+}
+
+func splitStateIntoChunks(state *core.AccountState, chunkSize uint64) ([][]byte, string, []string) {
+	if chunkSize == 0 {
+		chunkSize = 128
+	}
+	raw := state.Encode()
+	if len(raw) == 0 {
+		return [][]byte{{}}, stableHashStrings([]string{"empty"}), []string{chunkHash([]byte{})}
+	}
+	chunks := make([][]byte, 0)
+	hashes := make([]string, 0)
+	for start := 0; start < len(raw); start += int(chunkSize) {
+		end := start + int(chunkSize)
+		if end > len(raw) {
+			end = len(raw)
+		}
+		cp := append([]byte(nil), raw[start:end]...)
+		chunks = append(chunks, cp)
+		hashes = append(hashes, chunkHash(cp))
+	}
+	commitmentParts := []string{hex.EncodeToString(state.Hash())}
+	commitmentParts = append(commitmentParts, hashes...)
+	return chunks, stableHashStrings(commitmentParts), hashes
+}
+
+func requestHydrationChunk(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_supportCLPA, cap *message.ShadowCapsule, chunkIndex uint64, expectedCommitment string) {
+	if pbftNode.NodeID != uint64(pbftNode.view.Load()) {
+		return
+	}
+	chunkSize := cdm.PendingHydrationChunkSize
+	if chunkSize == 0 {
+		chunkSize = 128
+	}
+	req := &message.HydrationRequest{
+		Addr:               cap.Addr,
+		EpochTag:           cap.EpochTag,
+		FromShard:          cap.CurrentShard,
+		ToShard:            cap.TargetShard,
+		Requester:          pbftNode.ShardID,
+		NeedFull:           true,
+		ChunkIndex:         chunkIndex,
+		ChunkSize:          chunkSize,
+		ExpectedCommitment: expectedCommitment,
+	}
+	cdm.PendingHydrationRequests[cap.Addr] = req
+	b, err := json.Marshal(req)
+	if err != nil {
+		log.Panic(err)
+	}
+	msg := message.MergeMessage(message.CHydrationRequest, b)
+	for nid := uint64(0); nid < pbftNode.pbftChainConfig.Nodes_perShard; nid++ {
+		networks.TcpDial(msg, pbftNode.ip_nodeTable[cap.CurrentShard][nid])
+	}
+}
+
 func issueHydrationRequests(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_supportCLPA, caps []message.ShadowCapsule) {
 	if pbftNode.NodeID != uint64(pbftNode.view.Load()) {
 		return
@@ -210,24 +315,8 @@ func issueHydrationRequests(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_s
 		if _, exists := cdm.PendingHydrationRequests[cap.Addr]; exists {
 			continue
 		}
-		req := &message.HydrationRequest{
-			Addr:      cap.Addr,
-			EpochTag:  cap.EpochTag,
-			FromShard: cap.CurrentShard,
-			ToShard:   cap.TargetShard,
-			Requester: pbftNode.ShardID,
-			NeedFull:  true,
-		}
-		cdm.PendingHydrationRequests[cap.Addr] = req
-		b, err := json.Marshal(req)
-		if err != nil {
-			log.Panic(err)
-		}
-		msg := message.MergeMessage(message.CHydrationRequest, b)
-		// 广播到源 shard 的全部节点，保证所有节点都能收到请求
-		for nid := uint64(0); nid < pbftNode.pbftChainConfig.Nodes_perShard; nid++ {
-			networks.TcpDial(msg, pbftNode.ip_nodeTable[cap.CurrentShard][nid])
-		}
+		cp := cap
+		requestHydrationChunk(pbftNode, cdm, &cp, 0, "")
 	}
 }
 
@@ -239,36 +328,98 @@ func handleHydrationRequestCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.
 	if !ok || state == nil {
 		return
 	}
+	chunkSize := req.ChunkSize
+	if chunkSize == 0 {
+		chunkSize = cdm.PendingHydrationChunkSize
+	}
+	chunks, commitment, hashes := splitStateIntoChunks(state, chunkSize)
+	if req.ExpectedCommitment != "" && req.ExpectedCommitment != commitment {
+		return
+	}
+	if req.ChunkIndex >= uint64(len(chunks)) {
+		return
+	}
+	idx := req.ChunkIndex
+	payload := chunks[idx]
 	data := &message.HydrationData{
-		Addr:       req.Addr,
-		EpochTag:   req.EpochTag,
-		FromShard:  req.FromShard,
-		ToShard:    req.ToShard,
-		FullState:  state.Clone(),
-		ChunkIndex: 0,
-		ChunkTotal: 1,
-		IsFinal:    true,
+		Addr:            req.Addr,
+		EpochTag:        req.EpochTag,
+		FromShard:       req.FromShard,
+		ToShard:         req.ToShard,
+		ChunkIndex:      idx,
+		ChunkTotal:      uint64(len(chunks)),
+		ChunkPayload:    payload,
+		ChunkHash:       hashes[idx],
+		StateCommitment: commitment,
+		ProofSystem:     "mock-merkle",
+		ChunkProof:      buildChunkProof(commitment, hashes[idx], idx, uint64(len(chunks))),
+		IsFinal:         idx+1 == uint64(len(chunks)),
 	}
 	b, err := json.Marshal(data)
 	if err != nil {
 		log.Panic(err)
 	}
 	msg := message.MergeMessage(message.CHydrationData, b)
-	// 广播到目标 shard 的全部节点，确保所有节点都补齐 full state
 	for nid := uint64(0); nid < pbftNode.pbftChainConfig.Nodes_perShard; nid++ {
 		networks.TcpDial(msg, pbftNode.ip_nodeTable[req.ToShard][nid])
 	}
 }
 
 func handleHydrationDataCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_supportCLPA, data *message.HydrationData) {
-	cdm.PendingHydrationData[data.Addr] = data
-	cur := pbftNode.CurChain.GetAccountState(data.Addr)
-	full := cur.ApplyHydration(data.FullState, data.EpochTag)
-	pbftNode.CurChain.PutAccountState(data.Addr, full)
-	cdm.HydratedAccounts[data.Addr] = true
-	delete(cdm.PendingHydrationData, data.Addr)
-	delete(cdm.PendingHydrationRequests, data.Addr)
-	maybeSendRetirementProof(pbftNode, cdm, data.Addr, data.EpochTag)
+	expectedHash := chunkHash(data.ChunkPayload)
+	if expectedHash != data.ChunkHash {
+		return
+	}
+	expectedProof := buildChunkProof(data.StateCommitment, data.ChunkHash, data.ChunkIndex, data.ChunkTotal)
+	if expectedProof != data.ChunkProof {
+		return
+	}
+
+	if _, ok := cdm.PendingHydrationChunks[data.Addr]; !ok {
+		cdm.PendingHydrationChunks[data.Addr] = make(map[uint64][]byte)
+	}
+	if oldCommit, ok := cdm.PendingHydrationCommitments[data.Addr]; ok && oldCommit != data.StateCommitment {
+		return
+	}
+	cdm.PendingHydrationCommitments[data.Addr] = data.StateCommitment
+	cdm.PendingHydrationChunkTotal[data.Addr] = data.ChunkTotal
+	cdm.PendingHydrationChunks[data.Addr][data.ChunkIndex] = append([]byte(nil), data.ChunkPayload...)
+
+	received := uint64(len(cdm.PendingHydrationChunks[data.Addr]))
+	total := cdm.PendingHydrationChunkTotal[data.Addr]
+
+	if received == total {
+		fullBytes := make([]byte, 0)
+		for i := uint64(0); i < total; i++ {
+			chunk, ok := cdm.PendingHydrationChunks[data.Addr][i]
+			if !ok {
+				return
+			}
+			fullBytes = append(fullBytes, chunk...)
+		}
+		fullState := core.DecodeAS(fullBytes)
+		cur := pbftNode.CurChain.GetAccountState(data.Addr)
+		full := cur.ApplyHydration(fullState, data.EpochTag)
+		pbftNode.CurChain.PutAccountState(data.Addr, full)
+		cdm.HydratedAccounts[data.Addr] = true
+
+		delete(cdm.PendingHydrationData, data.Addr)
+		delete(cdm.PendingHydrationRequests, data.Addr)
+		delete(cdm.PendingHydrationChunks, data.Addr)
+		delete(cdm.PendingHydrationChunkTotal, data.Addr)
+		delete(cdm.PendingHydrationCommitments, data.Addr)
+
+		maybeSendRetirementProof(pbftNode, cdm, data.Addr, data.EpochTag)
+		return
+	}
+
+	nextIndex := data.ChunkIndex + 1
+	if nextIndex < total {
+		cap, ok := cdm.ShadowCapsulePool[data.Addr]
+		if ok && cap != nil {
+			requestHydrationChunk(pbftNode, cdm, cap, nextIndex, data.StateCommitment)
+		}
+	}
 }
 
 func handleRetirementProofCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_supportCLPA, proof *message.RetirementProof) {
@@ -278,7 +429,6 @@ func handleRetirementProofCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.D
 	cdm.RetirementProofPool[proof.Addr] = proof
 	cdm.RetiredAccounts[proof.Addr] = true
 	delete(cdm.SourceCustodyState, proof.Addr)
-	// 旧 shard 上直接删除托管副本，而不是 freeze 一个已经不再属于本 shard 的地址
 	pbftNode.CurChain.DeleteAccounts([]string{proof.Addr})
 }
 
@@ -307,7 +457,6 @@ func maybeSendRetirementProof(pbftNode *PbftConsensusNode, cdm *dataSupport.Data
 		log.Panic(err)
 	}
 	msg := message.MergeMessage(message.CRetirementProof, b)
-	// 广播到源 shard 全部节点，保证所有节点都退休旧副本
 	for nid := uint64(0); nid < pbftNode.pbftChainConfig.Nodes_perShard; nid++ {
 		networks.TcpDial(msg, pbftNode.ip_nodeTable[cap.CurrentShard][nid])
 	}

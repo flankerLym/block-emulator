@@ -40,7 +40,12 @@ type ReshardingValidityCertificate struct {
 	PartitionDigest string
 	CapsuleDigest   string
 	BalanceDigest   string
-	Proof           string
+
+	ProofSystem   string
+	VerifierKeyID string
+	PublicInputs  []string
+	ProofBytes    []byte
+	ProofDigest   string
 }
 
 type DualAnchorReceipt struct {
