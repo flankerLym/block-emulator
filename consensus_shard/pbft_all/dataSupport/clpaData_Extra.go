@@ -35,6 +35,10 @@ type Data_supportCLPA struct {
 	PendingHydrationCommitments map[string]string
 	PendingHydrationChunkSize   uint64
 
+	// address -> local block height when the shadow account was first installed.
+	// This is used to implement delayed / lazy hydration scheduling.
+	ShadowInstallHeight map[string]uint64
+
 	RVCPool               map[string]*message.ReshardingValidityCertificate
 	DualAnchorReceiptPool map[string]*message.DualAnchorReceipt
 	ShadowCapsulePool     map[string]*message.ShadowCapsule
@@ -69,6 +73,7 @@ func NewCLPADataSupport() *Data_supportCLPA {
 		PendingHydrationChunkTotal:  make(map[string]uint64),
 		PendingHydrationCommitments: make(map[string]string),
 		PendingHydrationChunkSize:   128,
+		ShadowInstallHeight:         make(map[string]uint64),
 		RVCPool:                     make(map[string]*message.ReshardingValidityCertificate),
 		DualAnchorReceiptPool:       make(map[string]*message.DualAnchorReceipt),
 		ShadowCapsulePool:           make(map[string]*message.ShadowCapsule),

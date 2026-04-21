@@ -272,6 +272,9 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) accountTransfer_do(atm *mess
 	}
 	cphm.pbftNode.CurChain.AddAccounts(atm.Addrs, atm.AccountState, cphm.pbftNode.view.Load())
 	if atm.Algorithm == "ZKSCAR" {
+		if !validateInstalledShadowAccounts(cphm.pbftNode, atm.ShadowCapsules) {
+			log.Panic("ZK-SCAR shadow account installation validation failed")
+		}
 		shadowRoot := stateRootHex(cphm.pbftNode.CurChain.CurrentBlock.Header.StateRoot)
 		atm.DualReceipts = bindShadowRootToReceipts(atm.DualReceipts, shadowRoot)
 		for _, rvc := range atm.RVCs {
@@ -284,6 +287,7 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) accountTransfer_do(atm *mess
 			cphm.cdm.ShadowCapsulePool[cap.Addr] = &cp
 			cphm.cdm.OwnershipTransferred[cap.Addr] = true
 			cphm.cdm.HydratedAccounts[cap.Addr] = false
+			cphm.cdm.ShadowInstallHeight[cap.Addr] = currentStateHeight(cphm.pbftNode)
 		}
 		indexDualAnchorReceipts(cphm.cdm, atm.DualReceipts)
 		issueHydrationRequests(cphm.pbftNode, cphm.cdm, atm.ShadowCapsules)

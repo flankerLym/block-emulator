@@ -5,6 +5,7 @@ import (
 	"blockEmulator/core"
 	"blockEmulator/message"
 	"blockEmulator/networks"
+	"blockEmulator/params"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -513,6 +514,33 @@ func splitStateIntoChunks(state *core.AccountState, chunkSize uint64) ([][]byte,
 	return chunks, stableHashStrings(commitmentParts), hashes
 }
 
+func currentStateHeight(pbftNode *PbftConsensusNode) uint64 {
+	if pbftNode == nil || pbftNode.CurChain == nil || pbftNode.CurChain.CurrentBlock == nil {
+		return 0
+	}
+	return uint64(pbftNode.CurChain.CurrentBlock.Header.Number)
+}
+
+func shouldIssueHydrationNow(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_supportCLPA, addr string) bool {
+	if cdm == nil || addr == "" {
+		return false
+	}
+	if cdm.HydratedAccounts[addr] {
+		return false
+	}
+	if _, ok := cdm.PendingHydrationRequests[addr]; ok {
+		return false
+	}
+	installHeight, ok := cdm.ShadowInstallHeight[addr]
+	if !ok {
+		return true
+	}
+	if params.ZKSCARHydrationDelayRounds <= 0 {
+		return true
+	}
+	return currentStateHeight(pbftNode) >= installHeight+uint64(params.ZKSCARHydrationDelayRounds)
+}
+
 func requestHydrationChunk(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_supportCLPA, cap *message.ShadowCapsule, chunkIndex uint64, expectedCommitment string) {
 	if pbftNode.NodeID != uint64(pbftNode.view.Load()) {
 		return
@@ -548,12 +576,60 @@ func issueHydrationRequests(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_s
 		return
 	}
 	for _, cap := range caps {
-		if _, exists := cdm.PendingHydrationRequests[cap.Addr]; exists {
+		if !shouldIssueHydrationNow(pbftNode, cdm, cap.Addr) {
 			continue
 		}
 		cp := cap
 		requestHydrationChunk(pbftNode, cdm, &cp, 0, "")
 	}
+}
+
+func issueDeferredHydrationRequests(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_supportCLPA) {
+	if pbftNode == nil || cdm == nil {
+		return
+	}
+	caps := make([]message.ShadowCapsule, 0)
+	for addr, cap := range cdm.ShadowCapsulePool {
+		if cap == nil {
+			continue
+		}
+		if cdm.HydratedAccounts[addr] {
+			continue
+		}
+		caps = append(caps, *cap)
+	}
+	issueHydrationRequests(pbftNode, cdm, caps)
+}
+
+func validateInstalledShadowAccounts(pbftNode *PbftConsensusNode, caps []message.ShadowCapsule) bool {
+	for _, cap := range caps {
+		state := pbftNode.CurChain.GetAccountState(cap.Addr)
+		if state == nil || !state.IsShadow() {
+			return false
+		}
+		if state.LastRVC != cap.RVCID {
+			return false
+		}
+		if state.EpochTag != cap.EpochTag || state.SourceShard != cap.CurrentShard || state.TargetShard != cap.TargetShard {
+			return false
+		}
+		if state.Balance == nil || state.Balance.String() != cap.Balance {
+			return false
+		}
+		if state.Nonce != cap.Nonce {
+			return false
+		}
+		if hex.EncodeToString(state.DebtRoot) != hex.EncodeToString(cap.DebtRoot) {
+			return false
+		}
+		if hex.EncodeToString(state.CodeHash) != hex.EncodeToString(cap.CodeHash) {
+			return false
+		}
+		if hex.EncodeToString(state.StorageRoot) != hex.EncodeToString(cap.StorageRoot) {
+			return false
+		}
+	}
+	return true
 }
 
 func handleHydrationRequestCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_supportCLPA, req *message.HydrationRequest) {
@@ -642,6 +718,7 @@ func handleHydrationDataCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.Dat
 		delete(cdm.PendingHydrationChunks, data.Addr)
 		delete(cdm.PendingHydrationChunkTotal, data.Addr)
 		delete(cdm.PendingHydrationCommitments, data.Addr)
+		delete(cdm.ShadowInstallHeight, data.Addr)
 		maybeSendRetirementProof(pbftNode, cdm, data.Addr, data.EpochTag)
 		return
 	}
@@ -681,6 +758,7 @@ func handleRetirementProofCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.D
 	cdm.RetirementProofPool[proof.Addr] = proof
 	cdm.RetiredAccounts[proof.Addr] = true
 	delete(cdm.SourceCustodyState, proof.Addr)
+	delete(cdm.ShadowInstallHeight, proof.Addr)
 	pbftNode.CurChain.DeleteAccounts([]string{proof.Addr})
 }
 
@@ -724,6 +802,7 @@ func maybeSendRetirementProof(pbftNode *PbftConsensusNode, cdm *dataSupport.Data
 }
 
 func applyPendingHydration(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_supportCLPA, currentRound uint64) {
+	issueDeferredHydrationRequests(pbftNode, cdm)
 	for addr, data := range cdm.PendingHydrationData {
 		if data != nil {
 			handleHydrationDataCommon(pbftNode, cdm, data)
@@ -972,6 +1051,9 @@ func (cphm *CLPAPbftInsideExtraHandleMod) accountTransfer_do(atm *message.Accoun
 	cphm.pbftNode.CurChain.AddAccounts(atm.Addrs, atm.AccountState, cphm.pbftNode.view.Load())
 
 	if atm.Algorithm == "ZKSCAR" {
+		if !validateInstalledShadowAccounts(cphm.pbftNode, atm.ShadowCapsules) {
+			log.Panic("ZK-SCAR shadow account installation validation failed")
+		}
 		shadowRoot := stateRootHex(cphm.pbftNode.CurChain.CurrentBlock.Header.StateRoot)
 		atm.DualReceipts = bindShadowRootToReceipts(atm.DualReceipts, shadowRoot)
 		for _, rvc := range atm.RVCs {
@@ -984,6 +1066,7 @@ func (cphm *CLPAPbftInsideExtraHandleMod) accountTransfer_do(atm *message.Accoun
 			cphm.cdm.ShadowCapsulePool[cap.Addr] = &cp
 			cphm.cdm.OwnershipTransferred[cap.Addr] = true
 			cphm.cdm.HydratedAccounts[cap.Addr] = false
+			cphm.cdm.ShadowInstallHeight[cap.Addr] = currentStateHeight(cphm.pbftNode)
 		}
 		indexDualAnchorReceipts(cphm.cdm, atm.DualReceipts)
 		issueHydrationRequests(cphm.pbftNode, cphm.cdm, atm.ShadowCapsules)
