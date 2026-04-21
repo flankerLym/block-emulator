@@ -32,23 +32,31 @@ type ShadowCapsule struct {
 }
 
 type ReshardingValidityCertificate struct {
-	Algorithm       string
-	EpochTag        uint64
-	FromShard       uint64
-	ToShard         uint64
-	CertificateID   string
-	PartitionDigest string
-	CapsuleDigest   string
-	BalanceDigest   string
+	Algorithm     string
+	EpochTag      uint64
+	FromShard     uint64
+	ToShard       uint64
+	CertificateID string
+
+	SourceStateRoot      string
+	SourceStateRootType  string
+	TargetShadowRoot     string
+	TargetShadowRootType string
+
+	PartitionDigest     string
+	CapsuleDigest       string
+	BalanceDigest       string
+	UniqueAddrDigest    string
+	DebtWitnessDigest   string
+	FreezeWitnessDigest string
+	BatchSize           uint64
 
 	ProofSystem   string
 	VerifierKeyID string
 	PublicInputs  []string
 	ProofBytes    []byte
 	ProofDigest   string
-
-	// 新增：显式标识这是 mock / real
-	ProofMode string
+	ProofMode     string
 }
 
 type DualAnchorReceipt struct {
@@ -57,9 +65,14 @@ type DualAnchorReceipt struct {
 	Recipient  string
 	OldRoot    string
 	ShadowRoot string
-	FromShard  uint64
-	ToShard    uint64
-	EpochTag   uint64
+
+	OldRootType    string
+	ShadowRootType string
+	RVCID          string
+
+	FromShard uint64
+	ToShard   uint64
+	EpochTag  uint64
 }
 
 type PartitionModifiedMap struct {

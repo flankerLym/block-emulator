@@ -444,6 +444,7 @@ func handleHydrationRequestCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.
 	}
 	idx := req.ChunkIndex
 	payload := chunks[idx]
+	proofSystem, chunkProof := zkBackend.BuildChunkProof(commitment, hashes[idx], idx, uint64(len(chunks)))
 	data := &message.HydrationData{
 		Addr:            req.Addr,
 		EpochTag:        req.EpochTag,
@@ -454,8 +455,8 @@ func handleHydrationRequestCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.
 		ChunkPayload:    payload,
 		ChunkHash:       hashes[idx],
 		StateCommitment: commitment,
-		ProofSystem:     "mock-merkle",
-		ChunkProof:      buildChunkProof(commitment, hashes[idx], idx, uint64(len(chunks))),
+		ProofSystem:     proofSystem,
+		ChunkProof:      chunkProof,
 		IsFinal:         idx+1 == uint64(len(chunks)),
 	}
 	b, err := json.Marshal(data)
@@ -473,8 +474,7 @@ func handleHydrationDataCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.Dat
 	if expectedHash != data.ChunkHash {
 		return
 	}
-	expectedProof := buildChunkProof(data.StateCommitment, data.ChunkHash, data.ChunkIndex, data.ChunkTotal)
-	if expectedProof != data.ChunkProof {
+	if !zkBackend.VerifyChunkProof(data.ProofSystem, data.StateCommitment, data.ChunkHash, data.ChunkProof, data.ChunkIndex, data.ChunkTotal) {
 		return
 	}
 
@@ -490,7 +490,6 @@ func handleHydrationDataCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.Dat
 
 	received := uint64(len(cdm.PendingHydrationChunks[data.Addr]))
 	total := cdm.PendingHydrationChunkTotal[data.Addr]
-
 	if received == total {
 		fullBytes := make([]byte, 0)
 		for i := uint64(0); i < total; i++ {
@@ -505,13 +504,11 @@ func handleHydrationDataCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.Dat
 		full := cur.ApplyHydration(fullState, data.EpochTag)
 		pbftNode.CurChain.PutAccountState(data.Addr, full)
 		cdm.HydratedAccounts[data.Addr] = true
-
 		delete(cdm.PendingHydrationData, data.Addr)
 		delete(cdm.PendingHydrationRequests, data.Addr)
 		delete(cdm.PendingHydrationChunks, data.Addr)
 		delete(cdm.PendingHydrationChunkTotal, data.Addr)
 		delete(cdm.PendingHydrationCommitments, data.Addr)
-
 		maybeSendRetirementProof(pbftNode, cdm, data.Addr, data.EpochTag)
 		return
 	}
@@ -524,9 +521,27 @@ func handleHydrationDataCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.Dat
 		}
 	}
 }
-
 func handleRetirementProofCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_supportCLPA, proof *message.RetirementProof) {
 	if !proof.Hydrated || !proof.DebtRootCleared {
+		return
+	}
+	cap, ok := cdm.ShadowCapsulePool[proof.Addr]
+	if !ok || cap == nil {
+		return
+	}
+	if cap.RVCID != proof.RVCID {
+		return
+	}
+	if cap.CurrentShard != proof.FromShard || cap.TargetShard != proof.ToShard {
+		return
+	}
+	if cap.EpochTag != proof.EpochTag {
+		return
+	}
+	if _, ok := cdm.RVCPool[proof.RVCID]; !ok {
+		return
+	}
+	if _, ok := cdm.SourceCustodyState[proof.Addr]; !ok {
 		return
 	}
 	cdm.RetirementProofPool[proof.Addr] = proof
@@ -632,6 +647,7 @@ func (cphm *CLPAPbftInsideExtraHandleMod) sendAccounts_and_Txs() {
 	asFetched := cphm.pbftNode.CurChain.FetchAccounts(accountToFetch)
 	cphm.pbftNode.CurChain.Txpool.GetLocked()
 	cphm.pbftNode.pl.Plog.Println("The size of tx pool is: ", len(cphm.pbftNode.CurChain.Txpool.TxQueue))
+
 	for i := uint64(0); i < cphm.pbftNode.pbftChainConfig.ShardNums; i++ {
 		if i == cphm.pbftNode.ShardID {
 			continue
@@ -646,11 +662,12 @@ func (cphm *CLPAPbftInsideExtraHandleMod) sendAccounts_and_Txs() {
 				baseState := asFetched[idx]
 				addrSend = append(addrSend, addr)
 				addrSet[addr] = true
-				cphm.cdm.SourceCustodyState[addr] = baseState.Clone()
 
 				if meta != nil && meta.Algorithm == "ZKSCAR" {
+					cphm.cdm.SourceCustodyState[addr] = baseState.Clone()
+					cphm.pbftNode.CurChain.FreezeAccount(addr, meta.EpochTag)
 					tmpl := templateCapsule(meta, addr)
-					debtRoot := debtRootForAddr(cphm.pbftNode.CurChain.Txpool.TxQueue, addr)
+					debtRoot := debtRootForAddr(cphm.pbftNode.CurChain.Txpool.TxQueue, cphm.cdm, addr)
 					cap := message.ShadowCapsule{
 						Addr:         addr,
 						CurrentShard: cphm.pbftNode.ShardID,
@@ -692,7 +709,8 @@ func (cphm *CLPAPbftInsideExtraHandleMod) sendAccounts_and_Txs() {
 		cphm.pbftNode.CurChain.Txpool.TxQueue = cphm.pbftNode.CurChain.Txpool.TxQueue[:firstPtr]
 
 		if meta != nil && meta.Algorithm == "ZKSCAR" {
-			rvc := buildBatchRVC(meta.EpochTag, cphm.pbftNode.ShardID, i, shadowCapsules)
+			sourceStateRoot := stateRootHex(cphm.pbftNode.CurChain.CurrentBlock.Header.StateRoot)
+			rvc := buildBatchRVC(meta.EpochTag, cphm.pbftNode.ShardID, i, shadowCapsules, sourceStateRoot)
 			for _, cap := range shadowCapsules {
 				shadowState := cphm.cdm.SourceCustodyState[cap.Addr].BuildShadowState(meta.EpochTag, cphm.pbftNode.ShardID, i, cap.DebtRoot, rvc.CertificateID)
 				asSend = append(asSend, shadowState)
@@ -705,7 +723,7 @@ func (cphm *CLPAPbftInsideExtraHandleMod) sendAccounts_and_Txs() {
 				Txs:            txSend,
 				Algorithm:      "ZKSCAR",
 				Stage:          "shadow",
-				DualReceipts:   buildDualAnchorReceipts(txSend, cphm.pbftNode.ShardID, i, meta.EpochTag),
+				DualReceipts:   buildDualAnchorReceipts(txSend, cphm.pbftNode.ShardID, i, meta.EpochTag, sourceStateRoot, rvc.CertificateID),
 				RVC:            rvc,
 			}
 			aByte, err := json.Marshal(ast)
@@ -800,7 +818,11 @@ func (cphm *CLPAPbftInsideExtraHandleMod) accountTransfer_do(atm *message.Accoun
 	cphm.pbftNode.CurChain.AddAccounts(atm.Addrs, atm.AccountState, cphm.pbftNode.view.Load())
 
 	if atm.Algorithm == "ZKSCAR" {
+		shadowRoot := stateRootHex(cphm.pbftNode.CurChain.CurrentBlock.Header.StateRoot)
+		atm.DualReceipts = bindShadowRootToReceipts(atm.DualReceipts, shadowRoot)
 		for _, rvc := range atm.RVCs {
+			rvc.TargetShadowRoot = shadowRoot
+			rvc.TargetShadowRootType = "mpt-state-root"
 			cphm.cdm.RVCPool[rvc.CertificateID] = rvc
 		}
 		for _, cap := range atm.ShadowCapsules {
@@ -821,11 +843,9 @@ func (cphm *CLPAPbftInsideExtraHandleMod) accountTransfer_do(atm *message.Accoun
 	cphm.cdm.ReceivedNewAccountState = make(map[string]*core.AccountState)
 	cphm.cdm.ReceivedNewTx = make([]*core.Transaction, 0)
 	cphm.cdm.PartitionOn = false
-
 	cphm.cdm.CollectLock.Lock()
 	cphm.cdm.CollectOver = false
 	cphm.cdm.CollectLock.Unlock()
-
 	cphm.cdm.P_ReadyLock.Lock()
 	cphm.cdm.PartitionReady = make(map[uint64]bool)
 	cphm.cdm.P_ReadyLock.Unlock()

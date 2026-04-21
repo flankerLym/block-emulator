@@ -8,11 +8,7 @@ import (
 )
 
 type ZKBackend interface {
-	BuildRVCProof(
-		epochTag, fromShard, toShard uint64,
-		capsuleDigest, partitionDigest, balanceDigest, certID string,
-	) (proofSystem string, verifierKeyID string, publicInputs []string, proofBytes []byte, proofDigest string, proofMode string)
-
+	BuildRVCProof(publicInputs []string) (proofSystem string, verifierKeyID string, proofBytes []byte, proofDigest string, proofMode string)
 	VerifyRVCProof(rvc *message.ReshardingValidityCertificate) bool
 
 	BuildChunkProof(commitment, hash string, idx, total uint64) (proofSystem string, proof string)
@@ -26,27 +22,15 @@ func buildBackendDigest(parts []string) string {
 	return hex.EncodeToString(h[:])
 }
 
-func (m *MockZKBackend) BuildRVCProof(
-	epochTag, fromShard, toShard uint64,
-	capsuleDigest, partitionDigest, balanceDigest, certID string,
-) (string, string, []string, []byte, string, string) {
-	publicInputs := []string{
-		capsuleDigest,
-		partitionDigest,
-		balanceDigest,
-		certID,
-		strconv.FormatUint(epochTag, 10),
-		strconv.FormatUint(fromShard, 10),
-		strconv.FormatUint(toShard, 10),
-	}
+func (m *MockZKBackend) BuildRVCProof(publicInputs []string) (string, string, []byte, string, string) {
 	proofBytes := []byte(buildBackendDigest(append([]string{"mock-proof"}, publicInputs...)))
 	proofDigest := buildBackendDigest([]string{
 		"mock-groth16",
-		"zkscar-vk-v1",
+		"zkscar-vk-v2",
 		stringsJoin(publicInputs),
 		hex.EncodeToString(proofBytes),
 	})
-	return "mock-groth16", "zkscar-vk-v1", publicInputs, proofBytes, proofDigest, "mock"
+	return "mock-groth16", "zkscar-vk-v2", proofBytes, proofDigest, "mock"
 }
 
 func (m *MockZKBackend) VerifyRVCProof(rvc *message.ReshardingValidityCertificate) bool {

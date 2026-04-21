@@ -59,6 +59,7 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendAccounts_and_Txs() {
 	}
 	asFetched := cphm.pbftNode.CurChain.FetchAccounts(accountToFetch)
 	cphm.pbftNode.CurChain.Txpool.GetLocked()
+
 	for i := uint64(0); i < cphm.pbftNode.pbftChainConfig.ShardNums; i++ {
 		if i == cphm.pbftNode.ShardID {
 			continue
@@ -73,10 +74,11 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendAccounts_and_Txs() {
 				baseState := asFetched[idx]
 				addrSend = append(addrSend, addr)
 				addrSet[addr] = true
-				cphm.cdm.SourceCustodyState[addr] = baseState.Clone()
 				if meta != nil && meta.Algorithm == "ZKSCAR" {
+					cphm.cdm.SourceCustodyState[addr] = baseState.Clone()
+					cphm.pbftNode.CurChain.FreezeAccount(addr, meta.EpochTag)
 					tmpl := templateCapsule(meta, addr)
-					debtRoot := debtRootForAddr(cphm.pbftNode.CurChain.Txpool.TxQueue, addr)
+					debtRoot := debtRootForAddr(cphm.pbftNode.CurChain.Txpool.TxQueue, cphm.cdm, addr)
 					cap := message.ShadowCapsule{
 						Addr:         addr,
 						CurrentShard: cphm.pbftNode.ShardID,
@@ -140,7 +142,8 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendAccounts_and_Txs() {
 		cphm.pbftNode.CurChain.Txpool.TxQueue = cphm.pbftNode.CurChain.Txpool.TxQueue[:firstPtr]
 
 		if meta != nil && meta.Algorithm == "ZKSCAR" {
-			rvc := buildBatchRVC(meta.EpochTag, cphm.pbftNode.ShardID, i, shadowCapsules)
+			sourceStateRoot := stateRootHex(cphm.pbftNode.CurChain.CurrentBlock.Header.StateRoot)
+			rvc := buildBatchRVC(meta.EpochTag, cphm.pbftNode.ShardID, i, shadowCapsules, sourceStateRoot)
 			for _, cap := range shadowCapsules {
 				shadowState := cphm.cdm.SourceCustodyState[cap.Addr].BuildShadowState(meta.EpochTag, cphm.pbftNode.ShardID, i, cap.DebtRoot, rvc.CertificateID)
 				asSend = append(asSend, shadowState)
@@ -153,7 +156,7 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendAccounts_and_Txs() {
 				Txs:            txSend,
 				Algorithm:      "ZKSCAR",
 				Stage:          "shadow",
-				DualReceipts:   buildDualAnchorReceipts(txSend, cphm.pbftNode.ShardID, i, meta.EpochTag),
+				DualReceipts:   buildDualAnchorReceipts(txSend, cphm.pbftNode.ShardID, i, meta.EpochTag, sourceStateRoot, rvc.CertificateID),
 				RVC:            rvc,
 			}
 			aByte, err := json.Marshal(ast)
@@ -249,7 +252,11 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) accountTransfer_do(atm *mess
 	}
 	cphm.pbftNode.CurChain.AddAccounts(atm.Addrs, atm.AccountState, cphm.pbftNode.view.Load())
 	if atm.Algorithm == "ZKSCAR" {
+		shadowRoot := stateRootHex(cphm.pbftNode.CurChain.CurrentBlock.Header.StateRoot)
+		atm.DualReceipts = bindShadowRootToReceipts(atm.DualReceipts, shadowRoot)
 		for _, rvc := range atm.RVCs {
+			rvc.TargetShadowRoot = shadowRoot
+			rvc.TargetShadowRootType = "mpt-state-root"
 			cphm.cdm.RVCPool[rvc.CertificateID] = rvc
 		}
 		for _, cap := range atm.ShadowCapsules {
