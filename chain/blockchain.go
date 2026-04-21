@@ -29,6 +29,7 @@ type BlockChain struct {
 	Txpool       *core.TxPool
 	PartitionMap map[string]uint64
 	pmlock       sync.RWMutex
+	stateLock    sync.RWMutex
 }
 
 func GetTxTreeRoot(txs []*core.Transaction) []byte {
@@ -67,7 +68,7 @@ func (bc *BlockChain) SendTx2Pool(txs []*core.Transaction) {
 	bc.Txpool.AddTxs2Pool(txs)
 }
 
-func (bc *BlockChain) GetUpdateStatusTrie(txs []*core.Transaction) common.Hash {
+func (bc *BlockChain) getUpdateStatusTrieNoLock(txs []*core.Transaction) common.Hash {
 	fmt.Printf("The len of txs is %d\n", len(txs))
 	if len(txs) == 0 {
 		return common.BytesToHash(bc.CurrentBlock.Header.StateRoot)
@@ -79,46 +80,46 @@ func (bc *BlockChain) GetUpdateStatusTrie(txs []*core.Transaction) common.Hash {
 	cnt := 0
 	for i, tx := range txs {
 		if !tx.Relayed && (bc.Get_PartitionMap(tx.Sender) == bc.ChainConfig.ShardID || tx.HasBroker) {
-			s_state_enc, _ := st.Get([]byte(tx.Sender))
-			var s_state *core.AccountState
-			if s_state_enc == nil {
+			sStateEnc, _ := st.Get([]byte(tx.Sender))
+			var sState *core.AccountState
+			if sStateEnc == nil {
 				ib := new(big.Int)
 				ib.Add(ib, params.Init_Balance)
-				s_state = &core.AccountState{Nonce: uint64(i), Balance: ib}
+				sState = &core.AccountState{Nonce: uint64(i), Balance: ib}
 			} else {
-				s_state = core.DecodeAS(s_state_enc)
+				sState = core.DecodeAS(sStateEnc)
 			}
-			if s_state.Retired {
+			if sState.Retired {
 				continue
 			}
-			if s_state.Balance.Cmp(tx.Value) == -1 {
+			if sState.Balance.Cmp(tx.Value) == -1 {
 				fmt.Printf("the balance is less than the transfer amount\n")
 				continue
 			}
-			s_state.Deduct(tx.Value)
-			st.Update([]byte(tx.Sender), s_state.Encode())
+			sState.Deduct(tx.Value)
+			st.Update([]byte(tx.Sender), sState.Encode())
 			cnt++
 		}
 		if bc.Get_PartitionMap(tx.Recipient) == bc.ChainConfig.ShardID || tx.HasBroker {
-			r_state_enc, _ := st.Get([]byte(tx.Recipient))
-			var r_state *core.AccountState
-			if r_state_enc == nil {
+			rStateEnc, _ := st.Get([]byte(tx.Recipient))
+			var rState *core.AccountState
+			if rStateEnc == nil {
 				ib := new(big.Int)
 				ib.Add(ib, params.Init_Balance)
-				r_state = &core.AccountState{Nonce: uint64(i), Balance: ib}
+				rState = &core.AccountState{Nonce: uint64(i), Balance: ib}
 			} else {
-				r_state = core.DecodeAS(r_state_enc)
+				rState = core.DecodeAS(rStateEnc)
 			}
-			if r_state.Retired {
+			if rState.Retired {
 				continue
 			}
-			r_state.Deposit(tx.Value)
+			rState.Deposit(tx.Value)
 			if params.JustitiaEnabled {
 				if tx.HasBroker && tx.Recipient == tx.FinalRecipient && tx.BrokerReward != nil {
-					r_state.Deposit(tx.BrokerReward)
+					rState.Deposit(tx.BrokerReward)
 				}
 			}
-			st.Update([]byte(tx.Recipient), r_state.Encode())
+			st.Update([]byte(tx.Recipient), rState.Encode())
 			cnt++
 		}
 	}
@@ -129,7 +130,7 @@ func (bc *BlockChain) GetUpdateStatusTrie(txs []*core.Transaction) common.Hash {
 	if ns != nil {
 		err = bc.triedb.Update(trie.NewWithNodeSet(ns))
 		if err != nil {
-			log.Panic()
+			log.Panic(err)
 		}
 		err = bc.triedb.Commit(rt, false)
 		if err != nil {
@@ -140,7 +141,16 @@ func (bc *BlockChain) GetUpdateStatusTrie(txs []*core.Transaction) common.Hash {
 	return rt
 }
 
+func (bc *BlockChain) GetUpdateStatusTrie(txs []*core.Transaction) common.Hash {
+	bc.stateLock.Lock()
+	defer bc.stateLock.Unlock()
+	return bc.getUpdateStatusTrieNoLock(txs)
+}
+
 func (bc *BlockChain) GenerateBlock(miner int32) *core.Block {
+	bc.stateLock.Lock()
+	defer bc.stateLock.Unlock()
+
 	var txs []*core.Transaction
 	if params.UseBlocksizeInBytes == 1 {
 		txs = bc.Txpool.PackTxsWithBytes(params.BlocksizeInBytes)
@@ -175,7 +185,7 @@ func (bc *BlockChain) GenerateBlock(miner int32) *core.Block {
 		}
 	}
 
-	rt := bc.GetUpdateStatusTrie(txs)
+	rt := bc.getUpdateStatusTrieNoLock(txs)
 	bh.StateRoot = rt.Bytes()
 	bh.TxRoot = GetTxTreeRoot(txs)
 	bh.Bloom = *GetBloomFilter(txs)
@@ -205,6 +215,9 @@ func (bc *BlockChain) NewGenisisBlock() *core.Block {
 }
 
 func (bc *BlockChain) AddGenisisBlock(gb *core.Block) {
+	bc.stateLock.Lock()
+	defer bc.stateLock.Unlock()
+
 	bc.Storage.AddBlock(gb)
 	newestHash, err := bc.Storage.GetNewestBlockHash()
 	if err != nil {
@@ -218,6 +231,9 @@ func (bc *BlockChain) AddGenisisBlock(gb *core.Block) {
 }
 
 func (bc *BlockChain) AddBlock(b *core.Block) {
+	bc.stateLock.Lock()
+	defer bc.stateLock.Unlock()
+
 	if b.Header.Number != bc.CurrentBlock.Header.Number+1 {
 		fmt.Println("the block height is not correct")
 		return
@@ -229,7 +245,7 @@ func (bc *BlockChain) AddBlock(b *core.Block) {
 
 	_, err := trie.New(trie.TrieID(common.BytesToHash(b.Header.StateRoot)), bc.triedb)
 	if err != nil {
-		rt := bc.GetUpdateStatusTrie(b.Body)
+		rt := bc.getUpdateStatusTrieNoLock(b.Body)
 		fmt.Println(bc.CurrentBlock.Header.Number+1, "the root = ", rt.Bytes())
 		if params.JustitiaEnabled {
 			st, err := trie.New(trie.TrieID(common.BytesToHash(rt.Bytes())), bc.triedb)
@@ -312,6 +328,9 @@ func NewBlockChain(cc *params.ChainConfig, db ethdb.Database) (*BlockChain, erro
 }
 
 func (bc *BlockChain) IsValidBlock(b *core.Block) error {
+	bc.stateLock.RLock()
+	defer bc.stateLock.RUnlock()
+
 	if string(b.Header.ParentBlockHash) != string(bc.CurrentBlock.Hash) {
 		fmt.Println("the parentblock hash is not equal to the current block hash")
 		return errors.New("the parentblock hash is not equal to the current block hash")
@@ -322,7 +341,7 @@ func (bc *BlockChain) IsValidBlock(b *core.Block) error {
 	return nil
 }
 
-func (bc *BlockChain) commitStateTrie(st *trie.Trie) []byte {
+func (bc *BlockChain) commitStateTrieNoLock(st *trie.Trie) []byte {
 	rt := bc.CurrentBlock.Header.StateRoot
 	rrt, ns := st.Commit(false)
 	if ns != nil {
@@ -339,7 +358,7 @@ func (bc *BlockChain) commitStateTrie(st *trie.Trie) []byte {
 	return rt
 }
 
-func (bc *BlockChain) buildEmptyStateBlock(rt []byte) {
+func (bc *BlockChain) buildEmptyStateBlockNoLock(rt []byte) {
 	emptyTxs := make([]*core.Transaction, 0)
 	bh := &core.BlockHeader{
 		ParentBlockHash: bc.CurrentBlock.Hash,
@@ -356,7 +375,7 @@ func (bc *BlockChain) buildEmptyStateBlock(rt []byte) {
 	bc.Storage.AddBlock(b)
 }
 
-func (bc *BlockChain) GetAccountState(addr string) *core.AccountState {
+func (bc *BlockChain) getAccountStateNoLock(addr string) *core.AccountState {
 	st, err := trie.New(trie.TrieID(common.BytesToHash(bc.CurrentBlock.Header.StateRoot)), bc.triedb)
 	if err != nil {
 		log.Panic(err)
@@ -370,11 +389,13 @@ func (bc *BlockChain) GetAccountState(addr string) *core.AccountState {
 	return core.DecodeAS(asenc)
 }
 
-func (bc *BlockChain) PutAccountState(addr string, as *core.AccountState) {
-	bc.PutAccountStates([]string{addr}, []*core.AccountState{as})
+func (bc *BlockChain) GetAccountState(addr string) *core.AccountState {
+	bc.stateLock.Lock()
+	defer bc.stateLock.Unlock()
+	return bc.getAccountStateNoLock(addr)
 }
 
-func (bc *BlockChain) PutAccountStates(ac []string, as []*core.AccountState) {
+func (bc *BlockChain) putAccountStatesNoLock(ac []string, as []*core.AccountState) {
 	if len(ac) == 0 {
 		return
 	}
@@ -391,11 +412,21 @@ func (bc *BlockChain) PutAccountStates(ac []string, as []*core.AccountState) {
 		}
 		st.Update([]byte(addr), as[i].Encode())
 	}
-	rt := bc.commitStateTrie(st)
-	bc.buildEmptyStateBlock(rt)
+	rt := bc.commitStateTrieNoLock(st)
+	bc.buildEmptyStateBlockNoLock(rt)
 }
 
-func (bc *BlockChain) DeleteAccounts(addrs []string) {
+func (bc *BlockChain) PutAccountState(addr string, as *core.AccountState) {
+	bc.PutAccountStates([]string{addr}, []*core.AccountState{as})
+}
+
+func (bc *BlockChain) PutAccountStates(ac []string, as []*core.AccountState) {
+	bc.stateLock.Lock()
+	defer bc.stateLock.Unlock()
+	bc.putAccountStatesNoLock(ac, as)
+}
+
+func (bc *BlockChain) deleteAccountsNoLock(addrs []string) {
 	if len(addrs) == 0 {
 		return
 	}
@@ -406,20 +437,31 @@ func (bc *BlockChain) DeleteAccounts(addrs []string) {
 	for _, addr := range addrs {
 		st.Delete([]byte(addr))
 	}
-	rt := bc.commitStateTrie(st)
-	bc.buildEmptyStateBlock(rt)
+	rt := bc.commitStateTrieNoLock(st)
+	bc.buildEmptyStateBlockNoLock(rt)
+}
+
+func (bc *BlockChain) DeleteAccounts(addrs []string) {
+	bc.stateLock.Lock()
+	defer bc.stateLock.Unlock()
+	bc.deleteAccountsNoLock(addrs)
 }
 
 func (bc *BlockChain) FreezeAccount(addr string, epochTag uint64) {
-	state := bc.GetAccountState(addr)
+	bc.stateLock.Lock()
+	defer bc.stateLock.Unlock()
+	state := bc.getAccountStateNoLock(addr)
 	if state == nil {
 		return
 	}
 	frozen := state.BuildRetiredCopy(epochTag)
-	bc.PutAccountState(addr, frozen)
+	bc.putAccountStatesNoLock([]string{addr}, []*core.AccountState{frozen})
 }
 
 func (bc *BlockChain) AddAccounts(ac []string, as []*core.AccountState, miner int32) {
+	bc.stateLock.Lock()
+	defer bc.stateLock.Unlock()
+
 	fmt.Printf("The len of accounts is %d, now adding the accounts\n", len(ac))
 	if len(ac) == 0 {
 		return
@@ -436,11 +478,11 @@ func (bc *BlockChain) AddAccounts(ac []string, as []*core.AccountState, miner in
 			st.Update([]byte(addr), as[i].Encode())
 		}
 	}
-	rt := bc.commitStateTrie(st)
-	bc.buildEmptyStateBlock(rt)
+	rt := bc.commitStateTrieNoLock(st)
+	bc.buildEmptyStateBlockNoLock(rt)
 }
 
-func (bc *BlockChain) FetchAccounts(addrs []string) []*core.AccountState {
+func (bc *BlockChain) fetchAccountsNoLock(addrs []string) []*core.AccountState {
 	res := make([]*core.AccountState, 0)
 	st, err := trie.New(trie.TrieID(common.BytesToHash(bc.CurrentBlock.Header.StateRoot)), bc.triedb)
 	if err != nil {
@@ -448,26 +490,36 @@ func (bc *BlockChain) FetchAccounts(addrs []string) []*core.AccountState {
 	}
 	for _, addr := range addrs {
 		asenc, _ := st.Get([]byte(addr))
-		var state_a *core.AccountState
+		var stateA *core.AccountState
 		if asenc == nil {
 			ib := new(big.Int)
 			ib.Add(ib, params.Init_Balance)
-			state_a = &core.AccountState{Nonce: 0, Balance: ib}
+			stateA = &core.AccountState{Nonce: 0, Balance: ib}
 		} else {
-			state_a = core.DecodeAS(asenc)
+			stateA = core.DecodeAS(asenc)
 		}
-		res = append(res, state_a)
+		res = append(res, stateA)
 	}
 	return res
 }
 
+func (bc *BlockChain) FetchAccounts(addrs []string) []*core.AccountState {
+	bc.stateLock.Lock()
+	defer bc.stateLock.Unlock()
+	return bc.fetchAccountsNoLock(addrs)
+}
+
 func (bc *BlockChain) CloseBlockChain() {
+	bc.stateLock.Lock()
+	defer bc.stateLock.Unlock()
 	bc.Storage.DataBase.Close()
 	bc.triedb.CommitPreimages()
 	bc.db.Close()
 }
 
 func (bc *BlockChain) PrintBlockChain() string {
+	bc.stateLock.RLock()
+	defer bc.stateLock.RUnlock()
 	vals := []interface{}{
 		bc.CurrentBlock.Header.Number,
 		bc.CurrentBlock.Hash,
