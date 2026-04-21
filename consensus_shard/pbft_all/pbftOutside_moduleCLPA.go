@@ -3,13 +3,12 @@ package pbft_all
 import (
 	"blockEmulator/chain"
 	"blockEmulator/consensus_shard/pbft_all/dataSupport"
+	"blockEmulator/core"
 	"blockEmulator/message"
 	"encoding/json"
 	"log"
 )
 
-// This module used in the blockChain using transaction relaying mechanism.
-// "CLPA" means that the blockChain use Account State Transfer protocal by clpa.
 type CLPARelayOutsideModule struct {
 	cdm      *dataSupport.Data_supportCLPA
 	pbftNode *PbftConsensusNode
@@ -23,20 +22,21 @@ func (crom *CLPARelayOutsideModule) HandleMessageOutsidePBFT(msgType message.Mes
 		crom.handleRelayWithProof(content)
 	case message.CInject:
 		crom.handleInjectTx(content)
-
-	// messages about CLPA / ZK-SCAR(shared transfer pipeline)
 	case message.CPartitionMsg:
 		crom.handlePartitionMsg(content)
 	case message.AccountState_and_TX:
 		crom.handleAccountStateAndTxMsg(content)
 	case message.CPartitionReady:
 		crom.handlePartitionReady(content)
+	case message.CAccountHydration:
+		crom.handleAccountHydrationMsg(content)
+	case message.CRetirementProof:
+		crom.handleRetirementProofMsg(content)
 	default:
 	}
 	return true
 }
 
-// receive relay transaction, which is for cross shard txs
 func (crom *CLPARelayOutsideModule) handleRelay(content []byte) {
 	relay := new(message.Relay)
 	err := json.Unmarshal(content, relay)
@@ -58,7 +58,6 @@ func (crom *CLPARelayOutsideModule) handleRelayWithProof(content []byte) {
 		log.Panic(err)
 	}
 	crom.pbftNode.pl.Plog.Printf("S%dN%d : has received relay txs & proofs from shard %d, the senderSeq is %d\n", crom.pbftNode.ShardID, crom.pbftNode.NodeID, rwp.SenderShardID, rwp.SenderSeq)
-	// validate the proofs of txs
 	isAllCorrect := true
 	for i, tx := range rwp.Txs {
 		if ok, _ := chain.TxProofVerify(tx.TxHash, &rwp.TxProofs[i]); !ok {
@@ -88,8 +87,6 @@ func (crom *CLPARelayOutsideModule) handleInjectTx(content []byte) {
 	crom.pbftNode.pl.Plog.Printf("S%dN%d : has handled injected txs msg, txs: %d \n", crom.pbftNode.ShardID, crom.pbftNode.NodeID, len(it.Txs))
 }
 
-// the leader received the partition message from listener/decider,
-// it init the local variant and send the accout message to other leaders.
 func (crom *CLPARelayOutsideModule) handlePartitionMsg(content []byte) {
 	pm := new(message.PartitionModifiedMap)
 	err := json.Unmarshal(content, pm)
@@ -109,7 +106,6 @@ func (crom *CLPARelayOutsideModule) handlePartitionMsg(content []byte) {
 	crom.cdm.PartitionOn = true
 }
 
-// wait for other shards' last rounds are over
 func (crom *CLPARelayOutsideModule) handlePartitionReady(content []byte) {
 	pr := new(message.PartitionReady)
 	err := json.Unmarshal(content, pr)
@@ -127,7 +123,6 @@ func (crom *CLPARelayOutsideModule) handlePartitionReady(content []byte) {
 	crom.pbftNode.pl.Plog.Printf("ready message from shard %d, seqid is %d\n", pr.FromShard, pr.NowSeqID)
 }
 
-// when the message from other shard arriving, it should be added into the message pool
 func (crom *CLPARelayOutsideModule) handleAccountStateAndTxMsg(content []byte) {
 	at := new(message.AccountStateAndTx)
 	err := json.Unmarshal(content, at)
@@ -156,4 +151,79 @@ func (crom *CLPARelayOutsideModule) handleAccountStateAndTxMsg(content []byte) {
 		crom.cdm.CollectLock.Unlock()
 		crom.pbftNode.pl.Plog.Printf("S%dN%d has added all accoutStateandTx~~~\n", crom.pbftNode.ShardID, crom.pbftNode.NodeID)
 	}
+}
+
+func (crom *CLPARelayOutsideModule) handleAccountHydrationMsg(content []byte) {
+	hm := new(message.AccountHydrationMsg)
+	err := json.Unmarshal(content, hm)
+	if err != nil {
+		log.Panic(err)
+	}
+	if hm.Algorithm != "ZKSCAR" || hm.ToShard != crom.pbftNode.ShardID {
+		return
+	}
+	if hm.RVC == nil || !validateRVCBatch(hm.RVC, hm.ShadowCapsules) {
+		log.Panic("invalid ZK-SCAR hydration message")
+	}
+
+	finalAddrs := make([]string, 0, len(hm.Addrs))
+	finalStates := make([]*core.AccountState, 0, len(hm.Addrs))
+	for i, addr := range hm.Addrs {
+		if i >= len(hm.AccountState) || hm.AccountState[i] == nil {
+			continue
+		}
+		fullState := hm.AccountState[i].FinalizeHydration(hm.EpochTag)
+		fullState.LastRVC = hm.RVC.CertificateID
+		fullState.OwnershipTransferred = true
+		fullState.PendingHydration = false
+		fullState.Hydrated = true
+		if cap, ok := crom.cdm.ShadowCapsulePool[addr]; ok {
+			fullState.SourceShard = cap.CurrentShard
+			fullState.TargetShard = cap.TargetShard
+			fullState.DebtRoot = append([]byte(nil), cap.DebtRoot...)
+		}
+		finalAddrs = append(finalAddrs, addr)
+		finalStates = append(finalStates, fullState)
+		crom.cdm.HydratedAccounts[addr] = true
+	}
+	if len(finalAddrs) == 0 {
+		return
+	}
+
+	crom.pbftNode.CurChain.UpsertAccountsFull(finalAddrs, finalStates)
+
+	if crom.pbftNode.NodeID == uint64(crom.pbftNode.view.Load()) {
+		rp := buildRetirementProof(hm.EpochTag, hm.FromShard, hm.ToShard, finalAddrs, hm.RVC.CertificateID)
+		rb, err := json.Marshal(rp)
+		if err != nil {
+			log.Panic(err)
+		}
+		sendMsg := message.MergeMessage(message.CRetirementProof, rb)
+		broadcastToShard(crom.pbftNode, hm.FromShard, sendMsg)
+	}
+}
+
+func (crom *CLPARelayOutsideModule) handleRetirementProofMsg(content []byte) {
+	rp := new(message.RetirementProof)
+	err := json.Unmarshal(content, rp)
+	if err != nil {
+		log.Panic(err)
+	}
+	if rp.Algorithm != "ZKSCAR" || rp.FromShard != crom.pbftNode.ShardID {
+		return
+	}
+	if !validateRetirementProof(rp) {
+		log.Panic("invalid retirement proof")
+	}
+
+	retireAddrs := make([]string, 0, len(rp.Addrs))
+	for _, addr := range rp.Addrs {
+		if crom.pbftNode.CurChain.Get_PartitionMap(addr) != crom.pbftNode.ShardID {
+			retireAddrs = append(retireAddrs, addr)
+		}
+	}
+	if len(retireAddrs) > 0 {
+		crom.pbftNode.CurChain.DeleteAccounts(retireAddrs)
+	}
+	crom.cdm.RetirementProofPool[rp.RVCID] = rp
 }

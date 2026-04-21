@@ -7,24 +7,23 @@ import (
 )
 
 type Data_supportCLPA struct {
-	ModifiedMap             []map[string]uint64 // record the modified map from the decider(s)
+	ModifiedMap             []map[string]uint64
 	PartitionMeta           []message.PartitionModifiedMap
-	AccountTransferRound    uint64                                // denote how many times accountTransfer do
-	ReceivedNewAccountState map[string]*core.AccountState         // the new accountState From other Shards
-	ReceivedNewTx           []*core.Transaction                   // new transactions from other shards' pool
-	AccountStateTx          map[uint64]*message.AccountStateAndTx // the map of accountState and transactions, pool
-	PartitionOn             bool                                  // judge nextEpoch is partition or not
+	AccountTransferRound    uint64
+	ReceivedNewAccountState map[string]*core.AccountState
+	ReceivedNewTx           []*core.Transaction
+	AccountStateTx          map[uint64]*message.AccountStateAndTx
+	PartitionOn             bool
 
-	PartitionReady map[uint64]bool // judge whether all shards has done all txs
-	P_ReadyLock    sync.Mutex      // lock for ready
+	PartitionReady map[uint64]bool
+	P_ReadyLock    sync.Mutex
 
-	ReadySeq     map[uint64]uint64 // record the seqid when the shard is ready
-	ReadySeqLock sync.Mutex        // lock for seqMap
+	ReadySeq     map[uint64]uint64
+	ReadySeqLock sync.Mutex
 
-	CollectOver bool       // judge whether all txs is collected or not
-	CollectLock sync.Mutex // lock for collect
+	CollectOver bool
+	CollectLock sync.Mutex
 
-	// ---- ZK-SCAR runtime states ----
 	OwnershipTransferred map[string]bool
 	HydratedAccounts     map[string]bool
 
@@ -34,6 +33,8 @@ type Data_supportCLPA struct {
 	RVCPool               map[string]*message.ReshardingValidityCertificate
 	DualAnchorReceiptPool map[string]*message.DualAnchorReceipt
 	ShadowCapsulePool     map[string]*message.ShadowCapsule
+	OutgoingHydration     map[uint64]*message.AccountHydrationMsg
+	RetirementProofPool   map[string]*message.RetirementProof
 }
 
 func NewCLPADataSupport() *Data_supportCLPA {
@@ -56,5 +57,7 @@ func NewCLPADataSupport() *Data_supportCLPA {
 		RVCPool:               make(map[string]*message.ReshardingValidityCertificate),
 		DualAnchorReceiptPool: make(map[string]*message.DualAnchorReceipt),
 		ShadowCapsulePool:     make(map[string]*message.ShadowCapsule),
+		OutgoingHydration:     make(map[uint64]*message.AccountHydrationMsg),
+		RetirementProofPool:   make(map[string]*message.RetirementProof),
 	}
 }

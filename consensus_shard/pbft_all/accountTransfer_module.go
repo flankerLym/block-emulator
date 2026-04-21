@@ -1,7 +1,3 @@
-// account transfer happens when the leader received the re-partition message.
-// leaders send the infos about the accounts to be transferred to other leaders, and
-// handle them.
-
 package pbft_all
 
 import (
@@ -155,6 +151,9 @@ func validateAccountTransferRVCs(atm *message.AccountTransferMsg) bool {
 	if atm.Algorithm != "ZKSCAR" {
 		return true
 	}
+	if len(atm.ShadowCapsules) == 0 {
+		return true
+	}
 	if len(atm.RVCs) == 0 {
 		return false
 	}
@@ -207,6 +206,43 @@ func buildDualAnchorReceipts(txs []*core.Transaction, fromShard, toShard uint64,
 	return out
 }
 
+func buildRetirementProof(epochTag, fromShard, toShard uint64, addrs []string, rvcID string) *message.RetirementProof {
+	cp := make([]string, len(addrs))
+	copy(cp, addrs)
+	sort.Strings(cp)
+	parts := []string{
+		rvcID,
+		hex.EncodeToString([]byte{byte(epochTag)}),
+		hex.EncodeToString([]byte{byte(fromShard)}),
+		hex.EncodeToString([]byte{byte(toShard)}),
+	}
+	parts = append(parts, cp...)
+	proofDigest := stableHashStrings(parts)
+	return &message.RetirementProof{
+		Algorithm: "ZKSCAR",
+		EpochTag:  epochTag,
+		FromShard: fromShard,
+		ToShard:   toShard,
+		Addrs:     cp,
+		RVCID:     rvcID,
+		Proof:     "retire:" + proofDigest,
+	}
+}
+
+func validateRetirementProof(rp *message.RetirementProof) bool {
+	if rp == nil || rp.Algorithm != "ZKSCAR" {
+		return false
+	}
+	expect := buildRetirementProof(rp.EpochTag, rp.FromShard, rp.ToShard, rp.Addrs, rp.RVCID)
+	return expect.Proof == rp.Proof
+}
+
+func broadcastToShard(pbftNode *PbftConsensusNode, shardID uint64, msg []byte) {
+	for nid := uint64(0); nid < pbftNode.pbftChainConfig.Nodes_perShard; nid++ {
+		go networks.TcpDial(msg, pbftNode.ip_nodeTable[shardID][nid])
+	}
+}
+
 func applyPendingHydration(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_supportCLPA, currentRound uint64) {
 	addrs := make([]string, 0)
 	states := make([]*core.AccountState, 0)
@@ -224,11 +260,10 @@ func applyPendingHydration(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_su
 		}
 	}
 	if len(addrs) > 0 {
-		pbftNode.CurChain.AddAccounts(addrs, states, pbftNode.view.Load())
+		pbftNode.CurChain.UpsertAccountsFull(addrs, states)
 	}
 }
 
-// this message used in propose stage, so it will be invoked by InsidePBFT_Module
 func (cphm *CLPAPbftInsideExtraHandleMod) sendPartitionReady() {
 	cphm.cdm.P_ReadyLock.Lock()
 	cphm.cdm.PartitionReady[cphm.pbftNode.ShardID] = true
@@ -251,7 +286,6 @@ func (cphm *CLPAPbftInsideExtraHandleMod) sendPartitionReady() {
 	cphm.pbftNode.pl.Plog.Print("Ready for partition\n")
 }
 
-// get whether all shards is ready, it will be invoked by InsidePBFT_Module
 func (cphm *CLPAPbftInsideExtraHandleMod) getPartitionReady() bool {
 	cphm.cdm.P_ReadyLock.Lock()
 	defer cphm.cdm.P_ReadyLock.Unlock()
@@ -269,9 +303,7 @@ func (cphm *CLPAPbftInsideExtraHandleMod) getPartitionReady() bool {
 	return len(cphm.cdm.PartitionReady) == int(cphm.pbftNode.pbftChainConfig.ShardNums) && flag
 }
 
-// send the transactions and the accountState to other leaders
 func (cphm *CLPAPbftInsideExtraHandleMod) sendAccounts_and_Txs() {
-	// generate accout transfer and txs message
 	accountToFetch := make([]string, 0)
 	lastMapid := len(cphm.cdm.ModifiedMap) - 1
 	meta := latestPartitionMeta(cphm.cdm)
@@ -282,7 +314,8 @@ func (cphm *CLPAPbftInsideExtraHandleMod) sendAccounts_and_Txs() {
 		}
 	}
 	asFetched := cphm.pbftNode.CurChain.FetchAccounts(accountToFetch)
-	// send the accounts to other shards
+	cphm.cdm.OutgoingHydration = make(map[uint64]*message.AccountHydrationMsg)
+
 	cphm.pbftNode.CurChain.Txpool.GetLocked()
 	cphm.pbftNode.pl.Plog.Println("The size of tx pool is: ", len(cphm.pbftNode.CurChain.Txpool.TxQueue))
 	for i := uint64(0); i < cphm.pbftNode.pbftChainConfig.ShardNums; i++ {
@@ -305,11 +338,6 @@ func (cphm *CLPAPbftInsideExtraHandleMod) sendAccounts_and_Txs() {
 				if meta != nil && meta.Algorithm == "ZKSCAR" {
 					tmpl := templateCapsule(meta, addr)
 					debtRoot := debtRootForAddr(cphm.pbftNode.CurChain.Txpool.TxQueue, addr)
-					shadowState := baseState.BuildShadowState(meta.EpochTag, cphm.pbftNode.ShardID, i, debtRoot, "")
-					asSend = append(asSend, shadowState)
-
-					hydrationAddrs = append(hydrationAddrs, addr)
-					hydrationStates = append(hydrationStates, baseState.FinalizeHydration(meta.EpochTag))
 
 					cap := message.ShadowCapsule{
 						Addr:         addr,
@@ -319,7 +347,7 @@ func (cphm *CLPAPbftInsideExtraHandleMod) sendAccounts_and_Txs() {
 						Nonce:        baseState.Nonce,
 						CodeHash:     append([]byte(nil), baseState.CodeHash...),
 						StorageRoot:  append([]byte(nil), baseState.StorageRoot...),
-						DebtRoot:     debtRoot,
+						DebtRoot:     append([]byte(nil), debtRoot...),
 						EpochTag:     meta.EpochTag,
 					}
 					if tmpl != nil {
@@ -328,12 +356,18 @@ func (cphm *CLPAPbftInsideExtraHandleMod) sendAccounts_and_Txs() {
 						cap.LocalityGain = tmpl.LocalityGain
 					}
 					shadowCapsules = append(shadowCapsules, cap)
+
+					shadowState := baseState.BuildShadowState(meta.EpochTag, cphm.pbftNode.ShardID, i, debtRoot, "")
+					asSend = append(asSend, shadowState)
+
+					hydrationAddrs = append(hydrationAddrs, addr)
+					hydrationStates = append(hydrationStates, baseState.FinalizeHydration(meta.EpochTag))
 				} else {
-					asSend = append(asSend, baseState)
+					asSend = append(asSend, baseState.Clone())
 				}
 			}
 		}
-		// fetch transactions to it, after the transactions is fetched, delete it in the pool
+
 		txSend := make([]*core.Transaction, 0)
 		firstPtr := 0
 		for secondPtr := 0; secondPtr < len(cphm.pbftNode.CurChain.Txpool.TxQueue); secondPtr++ {
@@ -353,20 +387,37 @@ func (cphm *CLPAPbftInsideExtraHandleMod) sendAccounts_and_Txs() {
 
 		cphm.pbftNode.pl.Plog.Printf("The txSend to shard %d is generated \n", i)
 		ast := message.AccountStateAndTx{
-			Addrs:          addrSend,
-			AccountState:   asSend,
-			HydrationAddrs: hydrationAddrs,
-			HydrationState: hydrationStates,
-			ShadowCapsules: shadowCapsules,
-			FromShard:      cphm.pbftNode.ShardID,
-			Txs:            txSend,
+			Addrs:        addrSend,
+			AccountState: asSend,
+			FromShard:    cphm.pbftNode.ShardID,
+			Txs:          txSend,
 		}
 		if meta != nil && meta.Algorithm == "ZKSCAR" {
 			ast.Algorithm = "ZKSCAR"
 			ast.Stage = "shadow"
-			receipts := buildDualAnchorReceipts(txSend, cphm.pbftNode.ShardID, i, meta.EpochTag)
-			ast.DualReceipts = receipts
-			ast.RVC = buildBatchRVC(meta.EpochTag, cphm.pbftNode.ShardID, i, shadowCapsules)
+			ast.DualReceipts = buildDualAnchorReceipts(txSend, cphm.pbftNode.ShardID, i, meta.EpochTag)
+			if len(shadowCapsules) > 0 {
+				rvc := buildBatchRVC(meta.EpochTag, cphm.pbftNode.ShardID, i, shadowCapsules)
+				for idx := range asSend {
+					asSend[idx].LastRVC = rvc.CertificateID
+				}
+				for idx := range hydrationStates {
+					hydrationStates[idx].LastRVC = rvc.CertificateID
+				}
+				ast.RVC = rvc
+				ast.ShadowCapsules = shadowCapsules
+				cphm.cdm.OutgoingHydration[i] = &message.AccountHydrationMsg{
+					Algorithm:      "ZKSCAR",
+					EpochTag:       meta.EpochTag,
+					FromShard:      cphm.pbftNode.ShardID,
+					ToShard:        i,
+					Addrs:          append([]string(nil), hydrationAddrs...),
+					AccountState:   hydrationStates,
+					ShadowCapsules: shadowCapsules,
+					RVC:            rvc,
+					Stage:          "hydration",
+				}
+			}
 		}
 		aByte, err := json.Marshal(ast)
 		if err != nil {
@@ -380,14 +431,12 @@ func (cphm *CLPAPbftInsideExtraHandleMod) sendAccounts_and_Txs() {
 	cphm.pbftNode.CurChain.Txpool.GetUnlocked()
 }
 
-// fetch collect infos
 func (cphm *CLPAPbftInsideExtraHandleMod) getCollectOver() bool {
 	cphm.cdm.CollectLock.Lock()
 	defer cphm.cdm.CollectLock.Unlock()
 	return cphm.cdm.CollectOver
 }
 
-// propose a partition message
 func (cphm *CLPAPbftInsideExtraHandleMod) proposePartition() (bool, *message.Request) {
 	cphm.pbftNode.pl.Plog.Printf("S%dN%d : begin partition proposing\n", cphm.pbftNode.ShardID, cphm.pbftNode.NodeID)
 	receivedHydrationState := make(map[string]*core.AccountState)
@@ -396,7 +445,7 @@ func (cphm *CLPAPbftInsideExtraHandleMod) proposePartition() (bool, *message.Req
 	rvcs := make([]*message.ReshardingValidityCertificate, 0)
 	algorithm := "CLPA"
 	stage := ""
-	// add all data in pool into the set
+
 	for _, at := range cphm.cdm.AccountStateTx {
 		for i, addr := range at.Addrs {
 			cphm.cdm.ReceivedNewAccountState[addr] = at.AccountState[i]
@@ -419,7 +468,7 @@ func (cphm *CLPAPbftInsideExtraHandleMod) proposePartition() (bool, *message.Req
 			stage = at.Stage
 		}
 	}
-	// propose, send all txs to other nodes in shard
+
 	cphm.pbftNode.pl.Plog.Println("The number of ReceivedNewTx: ", len(cphm.cdm.ReceivedNewTx))
 	for _, tx := range cphm.cdm.ReceivedNewTx {
 		if !tx.Relayed && cphm.cdm.ModifiedMap[cphm.cdm.AccountTransferRound][tx.Sender] != cphm.pbftNode.ShardID {
@@ -468,22 +517,21 @@ func (cphm *CLPAPbftInsideExtraHandleMod) proposePartition() (bool, *message.Req
 	return true, r
 }
 
-// all nodes in a shard will do accout Transfer, to sync the state trie
 func (cphm *CLPAPbftInsideExtraHandleMod) accountTransfer_do(atm *message.AccountTransferMsg) {
 	if atm.Algorithm == "ZKSCAR" && !validateAccountTransferRVCs(atm) {
 		log.Panic("ZK-SCAR RVC validation failed")
 	}
-	// change the partition Map
+
 	cnt := 0
 	for key, val := range atm.ModifiedMap {
 		cnt++
 		cphm.pbftNode.CurChain.Update_PartitionMap(key, val)
 	}
 	cphm.pbftNode.pl.Plog.Printf("%d key-vals are updated\n", cnt)
-	// add the account into the state trie
+
 	cphm.pbftNode.pl.Plog.Printf("%d addrs to add\n", len(atm.Addrs))
 	cphm.pbftNode.pl.Plog.Printf("%d accountstates to add\n", len(atm.AccountState))
-	cphm.pbftNode.CurChain.AddAccounts(atm.Addrs, atm.AccountState, cphm.pbftNode.view.Load())
+	cphm.pbftNode.CurChain.UpsertAccountsFull(atm.Addrs, atm.AccountState)
 
 	if atm.Algorithm == "ZKSCAR" {
 		for _, rvc := range atm.RVCs {
@@ -499,14 +547,6 @@ func (cphm *CLPAPbftInsideExtraHandleMod) accountTransfer_do(atm *message.Accoun
 			rc := receipt
 			cphm.cdm.DualAnchorReceiptPool[string(receipt.TxHash)] = &rc
 		}
-		for i, addr := range atm.HydrationAddrs {
-			if i >= len(atm.HydrationState) {
-				continue
-			}
-			cphm.cdm.PendingHydration[addr] = atm.HydrationState[i]
-			cphm.cdm.PendingHydrationRound[addr] = atm.ATid + uint64(params.ZKSCARHydrationDelayRounds)
-		}
-		applyPendingHydration(cphm.pbftNode, cphm.cdm, atm.ATid)
 	}
 
 	if uint64(len(cphm.cdm.ModifiedMap)) != atm.ATid {
@@ -525,6 +565,25 @@ func (cphm *CLPAPbftInsideExtraHandleMod) accountTransfer_do(atm *message.Accoun
 	cphm.cdm.P_ReadyLock.Lock()
 	cphm.cdm.PartitionReady = make(map[uint64]bool)
 	cphm.cdm.P_ReadyLock.Unlock()
+
+	if atm.Algorithm == "ZKSCAR" && cphm.pbftNode.NodeID == uint64(cphm.pbftNode.view.Load()) {
+		for sid, hyd := range cphm.cdm.OutgoingHydration {
+			if hyd == nil || len(hyd.Addrs) == 0 {
+				continue
+			}
+			payload := *hyd
+			go func(target uint64, hm message.AccountHydrationMsg) {
+				time.Sleep(time.Duration(params.Delay+params.JitterRange+200) * time.Millisecond)
+				hb, err := json.Marshal(hm)
+				if err != nil {
+					log.Panic(err)
+				}
+				sendMsg := message.MergeMessage(message.CAccountHydration, hb)
+				broadcastToShard(cphm.pbftNode, target, sendMsg)
+			}(sid, payload)
+		}
+	}
+	cphm.cdm.OutgoingHydration = make(map[uint64]*message.AccountHydrationMsg)
 
 	cphm.pbftNode.CurChain.PrintBlockChain()
 }

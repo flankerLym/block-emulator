@@ -2,13 +2,12 @@ package pbft_all
 
 import (
 	"blockEmulator/consensus_shard/pbft_all/dataSupport"
+	"blockEmulator/core"
 	"blockEmulator/message"
 	"encoding/json"
 	"log"
 )
 
-// This module used in the blockChain using Broker mechanism.
-// "CLPA" means that the blockChain use Account State Transfer protocal by clpa.
 type CLPABrokerOutsideModule struct {
 	cdm      *dataSupport.Data_supportCLPA
 	pbftNode *PbftConsensusNode
@@ -20,20 +19,21 @@ func (cbom *CLPABrokerOutsideModule) HandleMessageOutsidePBFT(msgType message.Me
 		cbom.handleSeqIDinfos(content)
 	case message.CInject:
 		cbom.handleInjectTx(content)
-
-	// messages about CLPA / ZK-SCAR(shared transfer pipeline)
 	case message.CPartitionMsg:
 		cbom.handlePartitionMsg(content)
 	case message.CAccountTransferMsg_broker:
 		cbom.handleAccountStateAndTxMsg(content)
 	case message.CPartitionReady:
 		cbom.handlePartitionReady(content)
+	case message.CAccountHydration:
+		cbom.handleAccountHydrationMsg(content)
+	case message.CRetirementProof:
+		cbom.handleRetirementProofMsg(content)
 	default:
 	}
 	return true
 }
 
-// receive SeqIDinfo
 func (cbom *CLPABrokerOutsideModule) handleSeqIDinfos(content []byte) {
 	sii := new(message.SeqIDinfo)
 	err := json.Unmarshal(content, sii)
@@ -57,8 +57,6 @@ func (cbom *CLPABrokerOutsideModule) handleInjectTx(content []byte) {
 	cbom.pbftNode.pl.Plog.Printf("S%dN%d : has handled injected txs msg, txs: %d \n", cbom.pbftNode.ShardID, cbom.pbftNode.NodeID, len(it.Txs))
 }
 
-// the leader received the partition message from listener/decider,
-// it init the local variant and send the accout message to other leaders.
 func (cbom *CLPABrokerOutsideModule) handlePartitionMsg(content []byte) {
 	pm := new(message.PartitionModifiedMap)
 	err := json.Unmarshal(content, pm)
@@ -78,7 +76,6 @@ func (cbom *CLPABrokerOutsideModule) handlePartitionMsg(content []byte) {
 	cbom.cdm.PartitionOn = true
 }
 
-// wait for other shards' last rounds are over
 func (cbom *CLPABrokerOutsideModule) handlePartitionReady(content []byte) {
 	pr := new(message.PartitionReady)
 	err := json.Unmarshal(content, pr)
@@ -96,7 +93,6 @@ func (cbom *CLPABrokerOutsideModule) handlePartitionReady(content []byte) {
 	cbom.pbftNode.pl.Plog.Printf("ready message from shard %d, seqid is %d\n", pr.FromShard, pr.NowSeqID)
 }
 
-// when the message from other shard arriving, it should be added into the message pool
 func (cbom *CLPABrokerOutsideModule) handleAccountStateAndTxMsg(content []byte) {
 	at := new(message.AccountStateAndTx)
 	err := json.Unmarshal(content, at)
@@ -125,4 +121,79 @@ func (cbom *CLPABrokerOutsideModule) handleAccountStateAndTxMsg(content []byte) 
 		cbom.cdm.CollectLock.Unlock()
 		cbom.pbftNode.pl.Plog.Printf("S%dN%d has added all accoutStateandTx~~~\n", cbom.pbftNode.ShardID, cbom.pbftNode.NodeID)
 	}
+}
+
+func (cbom *CLPABrokerOutsideModule) handleAccountHydrationMsg(content []byte) {
+	hm := new(message.AccountHydrationMsg)
+	err := json.Unmarshal(content, hm)
+	if err != nil {
+		log.Panic(err)
+	}
+	if hm.Algorithm != "ZKSCAR" || hm.ToShard != cbom.pbftNode.ShardID {
+		return
+	}
+	if hm.RVC == nil || !validateRVCBatch(hm.RVC, hm.ShadowCapsules) {
+		log.Panic("invalid ZK-SCAR hydration message")
+	}
+
+	finalAddrs := make([]string, 0, len(hm.Addrs))
+	finalStates := make([]*core.AccountState, 0, len(hm.Addrs))
+	for i, addr := range hm.Addrs {
+		if i >= len(hm.AccountState) || hm.AccountState[i] == nil {
+			continue
+		}
+		fullState := hm.AccountState[i].FinalizeHydration(hm.EpochTag)
+		fullState.LastRVC = hm.RVC.CertificateID
+		fullState.OwnershipTransferred = true
+		fullState.PendingHydration = false
+		fullState.Hydrated = true
+		if cap, ok := cbom.cdm.ShadowCapsulePool[addr]; ok {
+			fullState.SourceShard = cap.CurrentShard
+			fullState.TargetShard = cap.TargetShard
+			fullState.DebtRoot = append([]byte(nil), cap.DebtRoot...)
+		}
+		finalAddrs = append(finalAddrs, addr)
+		finalStates = append(finalStates, fullState)
+		cbom.cdm.HydratedAccounts[addr] = true
+	}
+	if len(finalAddrs) == 0 {
+		return
+	}
+
+	cbom.pbftNode.CurChain.UpsertAccountsFull(finalAddrs, finalStates)
+
+	if cbom.pbftNode.NodeID == uint64(cbom.pbftNode.view.Load()) {
+		rp := buildRetirementProof(hm.EpochTag, hm.FromShard, hm.ToShard, finalAddrs, hm.RVC.CertificateID)
+		rb, err := json.Marshal(rp)
+		if err != nil {
+			log.Panic(err)
+		}
+		sendMsg := message.MergeMessage(message.CRetirementProof, rb)
+		broadcastToShard(cbom.pbftNode, hm.FromShard, sendMsg)
+	}
+}
+
+func (cbom *CLPABrokerOutsideModule) handleRetirementProofMsg(content []byte) {
+	rp := new(message.RetirementProof)
+	err := json.Unmarshal(content, rp)
+	if err != nil {
+		log.Panic(err)
+	}
+	if rp.Algorithm != "ZKSCAR" || rp.FromShard != cbom.pbftNode.ShardID {
+		return
+	}
+	if !validateRetirementProof(rp) {
+		log.Panic("invalid retirement proof")
+	}
+
+	retireAddrs := make([]string, 0, len(rp.Addrs))
+	for _, addr := range rp.Addrs {
+		if cbom.pbftNode.CurChain.Get_PartitionMap(addr) != cbom.pbftNode.ShardID {
+			retireAddrs = append(retireAddrs, addr)
+		}
+	}
+	if len(retireAddrs) > 0 {
+		cbom.pbftNode.CurChain.DeleteAccounts(retireAddrs)
+	}
+	cbom.cdm.RetirementProofPool[rp.RVCID] = rp
 }

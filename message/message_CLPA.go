@@ -11,8 +11,10 @@ var (
 	AccountState_and_TX MessageType = "AccountState&txs"
 	PartitionReq        RequestType = "PartitionReq"
 
-	CPartitionMsg   MessageType = "PartitionModifiedMap"
-	CPartitionReady MessageType = "ready for partition"
+	CPartitionMsg     MessageType = "PartitionModifiedMap"
+	CPartitionReady   MessageType = "ready for partition"
+	CAccountHydration MessageType = "AccountHydration"
+	CRetirementProof  MessageType = "RetirementProof"
 )
 
 type ShadowCapsule struct {
@@ -54,6 +56,28 @@ type DualAnchorReceipt struct {
 	EpochTag   uint64
 }
 
+type AccountHydrationMsg struct {
+	Algorithm      string
+	EpochTag       uint64
+	FromShard      uint64
+	ToShard        uint64
+	Addrs          []string
+	AccountState   []*core.AccountState
+	ShadowCapsules []ShadowCapsule
+	RVC            *ReshardingValidityCertificate
+	Stage          string
+}
+
+type RetirementProof struct {
+	Algorithm string
+	EpochTag  uint64
+	FromShard uint64
+	ToShard   uint64
+	Addrs     []string
+	RVCID     string
+	Proof     string
+}
+
 type PartitionModifiedMap struct {
 	PartitionModified map[string]uint64
 	Algorithm         string
@@ -80,7 +104,6 @@ type PartitionReady struct {
 	NowSeqID  uint64
 }
 
-// this message used in inter-shard, it will be sent between leaders.
 type AccountStateAndTx struct {
 	Addrs          []string
 	AccountState   []*core.AccountState
