@@ -56,7 +56,7 @@ func templateCapsule(meta *message.PartitionModifiedMap, addr string) *message.S
 func debtRootForAddr(txs []*core.Transaction, addr string) []byte {
 	parts := make([]string, 0)
 	for _, tx := range txs {
-		if tx.Sender == addr || tx.Recipient == addr {
+		if string(tx.Sender) == addr || string(tx.Recipient) == addr {
 			parts = append(parts, hex.EncodeToString(tx.TxHash))
 		}
 	}
@@ -206,29 +206,33 @@ func validateAccountTransferRVCs(atm *message.AccountTransferMsg) bool {
 	return true
 }
 
+func receiptKey(txHash []byte) string {
+	return hex.EncodeToString(txHash)
+}
+
 func buildDualAnchorReceipts(txs []*core.Transaction, fromShard, toShard uint64, epochTag uint64) []message.DualAnchorReceipt {
 	out := make([]message.DualAnchorReceipt, 0, len(txs))
 	for _, tx := range txs {
 		oldRoot := stableHashStrings([]string{
 			"old",
 			hex.EncodeToString(tx.TxHash),
-			tx.Sender,
-			tx.Recipient,
+			string(tx.Sender),
+			string(tx.Recipient),
 			strconv.FormatUint(fromShard, 10),
 			strconv.FormatUint(epochTag, 10),
 		})
 		shadowRoot := stableHashStrings([]string{
 			"shadow",
 			hex.EncodeToString(tx.TxHash),
-			tx.Sender,
-			tx.Recipient,
+			string(tx.Sender),
+			string(tx.Recipient),
 			strconv.FormatUint(toShard, 10),
 			strconv.FormatUint(epochTag, 10),
 		})
 		out = append(out, message.DualAnchorReceipt{
 			TxHash:     append([]byte(nil), tx.TxHash...),
-			Sender:     tx.Sender,
-			Recipient:  tx.Recipient,
+			Sender:     string(tx.Sender),
+			Recipient:  string(tx.Recipient),
 			OldRoot:    oldRoot,
 			ShadowRoot: shadowRoot,
 			FromShard:  fromShard,
@@ -237,6 +241,105 @@ func buildDualAnchorReceipts(txs []*core.Transaction, fromShard, toShard uint64,
 		})
 	}
 	return out
+}
+
+func indexReceiptForAddress(cdm *dataSupport.Data_supportCLPA, addr, key string) {
+	if addr == "" {
+		return
+	}
+	if _, ok := cdm.AddressReceiptIndex[addr]; !ok {
+		cdm.AddressReceiptIndex[addr] = make(map[string]bool)
+	}
+	cdm.AddressReceiptIndex[addr][key] = true
+}
+
+func indexDualAnchorReceipts(cdm *dataSupport.Data_supportCLPA, receipts []message.DualAnchorReceipt) {
+	for _, receipt := range receipts {
+		rc := receipt
+		key := receiptKey(receipt.TxHash)
+		cdm.DualAnchorReceiptPool[key] = &rc
+		indexReceiptForAddress(cdm, receipt.Sender, key)
+		indexReceiptForAddress(cdm, receipt.Recipient, key)
+		if _, ok := cdm.SettledDualAnchorReceipts[key]; !ok {
+			cdm.SettledDualAnchorReceipts[key] = false
+		}
+	}
+}
+
+func markDualAnchorReceiptSettled(cdm *dataSupport.Data_supportCLPA, txHash []byte) {
+	if len(txHash) == 0 {
+		return
+	}
+	key := receiptKey(txHash)
+	if _, ok := cdm.DualAnchorReceiptPool[key]; ok {
+		cdm.SettledDualAnchorReceipts[key] = true
+	}
+}
+
+func markDualAnchorReceiptSettledForTx(cdm *dataSupport.Data_supportCLPA, tx *core.Transaction) {
+	if tx == nil {
+		return
+	}
+	markDualAnchorReceiptSettled(cdm, tx.TxHash)
+	if len(tx.RawTxHash) > 0 {
+		markDualAnchorReceiptSettled(cdm, tx.RawTxHash)
+	}
+}
+
+func markDualAnchorReceiptsSettledForBlock(cdm *dataSupport.Data_supportCLPA, txs []*core.Transaction) {
+	for _, tx := range txs {
+		markDualAnchorReceiptSettledForTx(cdm, tx)
+	}
+}
+
+func computeDebtRootCleared(cdm *dataSupport.Data_supportCLPA, addr string) bool {
+	keys, ok := cdm.AddressReceiptIndex[addr]
+	if !ok || len(keys) == 0 {
+		return true
+	}
+	for key := range keys {
+		if !cdm.SettledDualAnchorReceipts[key] {
+			return false
+		}
+	}
+	return true
+}
+
+func canRetireAddress(cdm *dataSupport.Data_supportCLPA, addr string) bool {
+	if !cdm.HydratedAccounts[addr] {
+		return false
+	}
+	return computeDebtRootCleared(cdm, addr)
+}
+
+func collectRetirementCandidatesForBlock(txs []*core.Transaction) []string {
+	set := make(map[string]bool)
+	for _, tx := range txs {
+		if tx == nil {
+			continue
+		}
+		set[string(tx.Sender)] = true
+		set[string(tx.Recipient)] = true
+		if string(tx.OriginalSender) != "" {
+			set[string(tx.OriginalSender)] = true
+		}
+		if string(tx.FinalRecipient) != "" {
+			set[string(tx.FinalRecipient)] = true
+		}
+	}
+	out := make([]string, 0, len(set))
+	for addr := range set {
+		out = append(out, addr)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func evaluateRetirementCandidatesForBlock(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_supportCLPA, txs []*core.Transaction, epochTag uint64) {
+	addrs := collectRetirementCandidatesForBlock(txs)
+	for _, addr := range addrs {
+		maybeSendRetirementProof(pbftNode, cdm, addr, epochTag)
+	}
 }
 
 func chunkHash(payload []byte) string {
@@ -436,11 +539,14 @@ func maybeSendRetirementProof(pbftNode *PbftConsensusNode, cdm *dataSupport.Data
 	if pbftNode.NodeID != uint64(pbftNode.view.Load()) {
 		return
 	}
+	if _, sent := cdm.RetirementProofPool[addr]; sent {
+		return
+	}
 	cap, ok := cdm.ShadowCapsulePool[addr]
 	if !ok || cap == nil {
 		return
 	}
-	if !cdm.HydratedAccounts[addr] {
+	if !canRetireAddress(cdm, addr) {
 		return
 	}
 	proof := &message.RetirementProof{
@@ -449,9 +555,15 @@ func maybeSendRetirementProof(pbftNode *PbftConsensusNode, cdm *dataSupport.Data
 		FromShard:       cap.CurrentShard,
 		ToShard:         cap.TargetShard,
 		Hydrated:        true,
-		DebtRootCleared: true,
+		DebtRootCleared: computeDebtRootCleared(cdm, addr),
 		RVCID:           cap.RVCID,
 	}
+	if !proof.DebtRootCleared {
+		return
+	}
+	// 目标 shard 先本地登记，避免重复发送
+	cdm.RetirementProofPool[addr] = proof
+
 	b, err := json.Marshal(proof)
 	if err != nil {
 		log.Panic(err)
@@ -566,9 +678,9 @@ func (cphm *CLPAPbftInsideExtraHandleMod) sendAccounts_and_Txs() {
 		firstPtr := 0
 		for secondPtr := 0; secondPtr < len(cphm.pbftNode.CurChain.Txpool.TxQueue); secondPtr++ {
 			ptx := cphm.pbftNode.CurChain.Txpool.TxQueue[secondPtr]
-			_, ok1 := addrSet[ptx.Sender]
+			_, ok1 := addrSet[string(ptx.Sender)]
 			condition1 := ok1 && !ptx.Relayed
-			_, ok2 := addrSet[ptx.Recipient]
+			_, ok2 := addrSet[string(ptx.Recipient)]
 			condition2 := ok2 && ptx.Relayed
 			if condition1 || condition2 {
 				txSend = append(txSend, ptx)
@@ -697,10 +809,7 @@ func (cphm *CLPAPbftInsideExtraHandleMod) accountTransfer_do(atm *message.Accoun
 			cphm.cdm.OwnershipTransferred[cap.Addr] = true
 			cphm.cdm.HydratedAccounts[cap.Addr] = false
 		}
-		for _, receipt := range atm.DualReceipts {
-			rc := receipt
-			cphm.cdm.DualAnchorReceiptPool[string(receipt.TxHash)] = &rc
-		}
+		indexDualAnchorReceipts(cphm.cdm, atm.DualReceipts)
 		issueHydrationRequests(cphm.pbftNode, cphm.cdm, atm.ShadowCapsules)
 	}
 

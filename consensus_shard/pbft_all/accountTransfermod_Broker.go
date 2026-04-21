@@ -106,8 +106,8 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendAccounts_and_Txs() {
 			ptx := cphm.pbftNode.CurChain.Txpool.TxQueue[secondPtr]
 			beSend := false
 			beRemoved := false
-			_, ok1 := addrSet[ptx.Sender]
-			_, ok2 := addrSet[ptx.Recipient]
+			_, ok1 := addrSet[string(ptx.Sender)]
+			_, ok2 := addrSet[string(ptx.Recipient)]
 			if ptx.RawTxHash == nil {
 				if ptx.HasBroker {
 					if ptx.SenderIsBroker {
@@ -121,10 +121,10 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendAccounts_and_Txs() {
 					txsBeCross = append(txsBeCross, ptx)
 					beRemoved = true
 				}
-			} else if ptx.FinalRecipient == ptx.Recipient {
+			} else if string(ptx.FinalRecipient) == string(ptx.Recipient) {
 				beSend = ok2
 				beRemoved = ok2
-			} else if ptx.OriginalSender == ptx.Sender {
+			} else if string(ptx.OriginalSender) == string(ptx.Sender) {
 				beRemoved = ok1
 				beSend = ok1
 			}
@@ -258,10 +258,7 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) accountTransfer_do(atm *mess
 			cphm.cdm.OwnershipTransferred[cap.Addr] = true
 			cphm.cdm.HydratedAccounts[cap.Addr] = false
 		}
-		for _, receipt := range atm.DualReceipts {
-			rc := receipt
-			cphm.cdm.DualAnchorReceiptPool[string(receipt.TxHash)] = &rc
-		}
+		indexDualAnchorReceipts(cphm.cdm, atm.DualReceipts)
 		issueHydrationRequests(cphm.pbftNode, cphm.cdm, atm.ShadowCapsules)
 	}
 	if uint64(len(cphm.cdm.ModifiedMap)) != atm.ATid {

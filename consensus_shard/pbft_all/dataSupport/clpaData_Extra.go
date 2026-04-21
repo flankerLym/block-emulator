@@ -40,6 +40,11 @@ type Data_supportCLPA struct {
 	ShadowCapsulePool     map[string]*message.ShadowCapsule
 	RetirementProofPool   map[string]*message.RetirementProof
 
+	// address -> receiptKey -> true
+	AddressReceiptIndex map[string]map[string]bool
+	// receiptKey -> settled
+	SettledDualAnchorReceipts map[string]bool
+
 	SourceCustodyState map[string]*core.AccountState
 	RetiredAccounts    map[string]bool
 }
@@ -68,6 +73,8 @@ func NewCLPADataSupport() *Data_supportCLPA {
 		DualAnchorReceiptPool:       make(map[string]*message.DualAnchorReceipt),
 		ShadowCapsulePool:           make(map[string]*message.ShadowCapsule),
 		RetirementProofPool:         make(map[string]*message.RetirementProof),
+		AddressReceiptIndex:         make(map[string]map[string]bool),
+		SettledDualAnchorReceipts:   make(map[string]bool),
 		SourceCustodyState:          make(map[string]*core.AccountState),
 		RetiredAccounts:             make(map[string]bool),
 	}
