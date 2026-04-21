@@ -30,6 +30,10 @@ func (crom *CLPARelayOutsideModule) HandleMessageOutsidePBFT(msgType message.Mes
 		crom.handlePartitionReady(content)
 	case message.CAccountHydration:
 		crom.handleAccountHydrationMsg(content)
+	case message.CHydrationRequest:
+		crom.handleHydrationRequest(content)
+	case message.CHydrationData:
+		crom.handleHydrationData(content)
 	case message.CRetirementProof:
 		crom.handleRetirementProofMsg(content)
 	default:
@@ -226,4 +230,30 @@ func (crom *CLPARelayOutsideModule) handleRetirementProofMsg(content []byte) {
 		crom.pbftNode.CurChain.DeleteAccounts(retireAddrs)
 	}
 	crom.cdm.RetirementProofPool[rp.RVCID] = rp
+}
+
+func (crom *CLPARelayOutsideModule) handleHydrationRequest(content []byte) {
+	hr := new(message.HydrationRequest)
+	err := json.Unmarshal(content, hr)
+	if err != nil {
+		log.Panic(err)
+	}
+	cphm := &CLPAPbftInsideExtraHandleMod{
+		cdm:      crom.cdm,
+		pbftNode: crom.pbftNode,
+	}
+	cphm.handleHydrationRequest(hr)
+}
+
+func (crom *CLPARelayOutsideModule) handleHydrationData(content []byte) {
+	hd := new(message.HydrationData)
+	err := json.Unmarshal(content, hd)
+	if err != nil {
+		log.Panic(err)
+	}
+	cphm := &CLPAPbftInsideExtraHandleMod{
+		cdm:      crom.cdm,
+		pbftNode: crom.pbftNode,
+	}
+	cphm.handleHydrationData(hd)
 }

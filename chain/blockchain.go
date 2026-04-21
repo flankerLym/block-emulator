@@ -428,13 +428,7 @@ func (bc *BlockChain) AddAccounts(ac []string, as []*core.AccountState, miner in
 		}
 		for i, addr := range ac {
 			if bc.Get_PartitionMap(addr) == bc.ChainConfig.ShardID {
-				ib := new(big.Int)
-				ib.Add(ib, as[i].Balance)
-				new_state := &core.AccountState{
-					Balance: ib,
-					Nonce:   as[i].Nonce,
-				}
-				st.Update([]byte(addr), new_state.Encode())
+				st.Update([]byte(addr), as[i].Encode())
 			}
 		}
 
@@ -464,6 +458,133 @@ func (bc *BlockChain) AddAccounts(ac []string, as []*core.AccountState, miner in
 
 	bc.CurrentBlock = b
 	bc.Storage.AddBlock(b)
+}
+
+// GetAccountState retrieves the full account state from the trie
+func (bc *BlockChain) GetAccountState(addr string) *core.AccountState {
+	st, err := trie.New(trie.TrieID(common.BytesToHash(bc.CurrentBlock.Header.StateRoot)), bc.triedb)
+	if err != nil {
+		log.Panic(err)
+	}
+	asenc, _ := st.Get([]byte(addr))
+	if asenc == nil {
+		return nil
+	}
+	return core.DecodeAS(asenc)
+}
+
+// PutAccountState stores the full account state into the trie
+func (bc *BlockChain) PutAccountState(addr string, as *core.AccountState) {
+	st, err := trie.New(trie.TrieID(common.BytesToHash(bc.CurrentBlock.Header.StateRoot)), bc.triedb)
+	if err != nil {
+		log.Panic(err)
+	}
+	st.Update([]byte(addr), as.Encode())
+	rrt, ns := st.Commit(false)
+	if ns != nil {
+		err = bc.triedb.Update(trie.NewWithNodeSet(ns))
+		if err != nil {
+			log.Panic(err)
+		}
+		err = bc.triedb.Commit(rrt, false)
+		if err != nil {
+			log.Panic(err)
+		}
+		// Update current block state root
+		bh := bc.CurrentBlock.Header
+		bh.StateRoot = rrt.Bytes()
+		bc.CurrentBlock.Header = bh
+	}
+}
+
+// PutAccountStates stores multiple account states into the trie
+func (bc *BlockChain) PutAccountStates(addrs []string, states []*core.AccountState) {
+	if len(addrs) != len(states) {
+		log.Panic("PutAccountStates: addrs and states length mismatch")
+	}
+	st, err := trie.New(trie.TrieID(common.BytesToHash(bc.CurrentBlock.Header.StateRoot)), bc.triedb)
+	if err != nil {
+		log.Panic(err)
+	}
+	for i, addr := range addrs {
+		st.Update([]byte(addr), states[i].Encode())
+	}
+	rrt, ns := st.Commit(false)
+	if ns != nil {
+		err = bc.triedb.Update(trie.NewWithNodeSet(ns))
+		if err != nil {
+			log.Panic(err)
+		}
+		err = bc.triedb.Commit(rrt, false)
+		if err != nil {
+			log.Panic(err)
+		}
+		// Update current block state root
+		bh := bc.CurrentBlock.Header
+		bh.StateRoot = rrt.Bytes()
+		bc.CurrentBlock.Header = bh
+	}
+}
+
+// DeleteAccounts removes accounts from the trie
+func (bc *BlockChain) DeleteAccounts(addrs []string) {
+	st, err := trie.New(trie.TrieID(common.BytesToHash(bc.CurrentBlock.Header.StateRoot)), bc.triedb)
+	if err != nil {
+		log.Panic(err)
+	}
+	for _, addr := range addrs {
+		st.Delete([]byte(addr))
+	}
+	rrt, ns := st.Commit(false)
+	if ns != nil {
+		err = bc.triedb.Update(trie.NewWithNodeSet(ns))
+		if err != nil {
+			log.Panic(err)
+		}
+		err = bc.triedb.Commit(rrt, false)
+		if err != nil {
+			log.Panic(err)
+		}
+		// Update current block state root
+		bh := bc.CurrentBlock.Header
+		bh.StateRoot = rrt.Bytes()
+		bc.CurrentBlock.Header = bh
+	}
+}
+
+// FreezeAccount marks an account as retired/frozen
+func (bc *BlockChain) FreezeAccount(addr string, epochTag uint64) {
+	st, err := trie.New(trie.TrieID(common.BytesToHash(bc.CurrentBlock.Header.StateRoot)), bc.triedb)
+	if err != nil {
+		log.Panic(err)
+	}
+	asenc, _ := st.Get([]byte(addr))
+	if asenc == nil {
+		return
+	}
+	as := core.DecodeAS(asenc)
+	retired := as.BuildRetiredCopy(epochTag)
+	st.Update([]byte(addr), retired.Encode())
+	rrt, ns := st.Commit(false)
+	if ns != nil {
+		err = bc.triedb.Update(trie.NewWithNodeSet(ns))
+		if err != nil {
+			log.Panic(err)
+		}
+		err = bc.triedb.Commit(rrt, false)
+		if err != nil {
+			log.Panic(err)
+		}
+		// Update current block state root
+		bh := bc.CurrentBlock.Header
+		bh.StateRoot = rrt.Bytes()
+		bc.CurrentBlock.Header = bh
+	}
+}
+
+// UpsertAccountsFull is an alias for PutAccountStates for compatibility
+func (bc *BlockChain) UpsertAccountsFull(addrs []string, states []*core.AccountState) {
+	bc.PutAccountStates(addrs, states)
 }
 
 // fetch accounts

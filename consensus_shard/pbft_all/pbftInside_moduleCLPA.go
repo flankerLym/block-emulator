@@ -22,6 +22,9 @@ type CLPAPbftInsideExtraHandleMod struct {
 func (cphm *CLPAPbftInsideExtraHandleMod) HandleinPropose() (bool, *message.Request) {
 	applyPendingHydration(cphm.pbftNode, cphm.cdm, cphm.cdm.AccountTransferRound)
 
+	// Handle shadow capsule post-processing (hydration requests)
+	cphm.sendHydrationRequests()
+
 	if cphm.cdm.PartitionOn {
 		cphm.sendPartitionReady()
 		for !cphm.getPartitionReady() {
@@ -211,4 +214,55 @@ func (cphm *CLPAPbftInsideExtraHandleMod) HandleforSequentialRequest(som *messag
 		cphm.pbftNode.CurChain.PrintBlockChain()
 	}
 	return true
+}
+
+// sendHydrationRequests sends hydration requests for shadow capsules
+func (cphm *CLPAPbftInsideExtraHandleMod) sendHydrationRequests() {
+	// Collect shadow accounts that need hydration
+	shadowAddrs := make([]string, 0)
+	sourceShards := make(map[uint64]bool)
+
+	for addr, state := range cphm.cdm.ReceivedNewAccountState {
+		if state.IsShadow() {
+			shadowAddrs = append(shadowAddrs, addr)
+			sourceShards[state.SourceShard] = true
+		}
+	}
+
+	// For each source shard, send hydration request
+	for sourceShard := range sourceShards {
+		relevantAddrs := make([]string, 0)
+		for _, addr := range shadowAddrs {
+			if state, ok := cphm.cdm.ReceivedNewAccountState[addr]; ok && state.SourceShard == sourceShard {
+				relevantAddrs = append(relevantAddrs, addr)
+			}
+		}
+
+		if len(relevantAddrs) > 0 {
+			// Get latest RVC for this epoch
+			rvcID := ""
+			for id := range cphm.cdm.RVCPool {
+				rvcID = id
+				break
+			}
+
+			hr := message.HydrationRequest{
+				Algorithm: "ZKSCAR",
+				EpochTag:  uint64(cphm.cdm.AccountTransferRound),
+				FromShard: sourceShard,
+				ToShard:   cphm.pbftNode.ShardID,
+				Addrs:     relevantAddrs,
+				RVCID:     rvcID,
+			}
+
+			hb, err := json.Marshal(hr)
+			if err != nil {
+				log.Panic(err)
+			}
+
+			sendMsg := message.MergeMessage(message.CHydrationRequest, hb)
+			broadcastToShard(cphm.pbftNode, sourceShard, sendMsg)
+			cphm.cdm.PendingHydrationRequests[hr.RVCID] = &hr
+		}
+	}
 }

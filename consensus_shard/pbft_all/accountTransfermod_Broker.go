@@ -61,7 +61,6 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendAccounts_and_Txs() {
 		}
 	}
 	asFetched := cphm.pbftNode.CurChain.FetchAccounts(accountToFetch)
-	cphm.cdm.OutgoingHydration = make(map[uint64]*message.AccountHydrationMsg)
 
 	cphm.pbftNode.CurChain.Txpool.GetLocked()
 	for i := uint64(0); i < cphm.pbftNode.pbftChainConfig.ShardNums; i++ {
@@ -71,8 +70,6 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendAccounts_and_Txs() {
 		addrSend := make([]string, 0)
 		addrSet := make(map[string]bool)
 		asSend := make([]*core.AccountState, 0)
-		hydrationAddrs := make([]string, 0)
-		hydrationStates := make([]*core.AccountState, 0)
 		shadowCapsules := make([]message.ShadowCapsule, 0)
 
 		for idx, addr := range accountToFetch {
@@ -106,8 +103,8 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendAccounts_and_Txs() {
 					shadowState := baseState.BuildShadowState(meta.EpochTag, cphm.pbftNode.ShardID, i, debtRoot, "")
 					asSend = append(asSend, shadowState)
 
-					hydrationAddrs = append(hydrationAddrs, addr)
-					hydrationStates = append(hydrationStates, baseState.FinalizeHydration(meta.EpochTag))
+					// 缓存完整状态到SourceCustodyState
+					cphm.cdm.SourceCustodyState[addr] = baseState.Clone()
 				} else {
 					asSend = append(asSend, baseState.Clone())
 				}
@@ -169,22 +166,8 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendAccounts_and_Txs() {
 				for idx := range asSend {
 					asSend[idx].LastRVC = rvc.CertificateID
 				}
-				for idx := range hydrationStates {
-					hydrationStates[idx].LastRVC = rvc.CertificateID
-				}
 				ast.RVC = rvc
 				ast.ShadowCapsules = shadowCapsules
-				cphm.cdm.OutgoingHydration[i] = &message.AccountHydrationMsg{
-					Algorithm:      "ZKSCAR",
-					EpochTag:       meta.EpochTag,
-					FromShard:      cphm.pbftNode.ShardID,
-					ToShard:        i,
-					Addrs:          append([]string(nil), hydrationAddrs...),
-					AccountState:   hydrationStates,
-					ShadowCapsules: shadowCapsules,
-					RVC:            rvc,
-					Stage:          "hydration",
-				}
 			}
 		}
 		aByte, err := json.Marshal(ast)
@@ -216,7 +199,6 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) getCollectOver() bool {
 
 func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) proposePartition() (bool, *message.Request) {
 	cphm.pbftNode.pl.Plog.Printf("S%dN%d : begin partition proposing\n", cphm.pbftNode.ShardID, cphm.pbftNode.NodeID)
-	receivedHydrationState := make(map[string]*core.AccountState)
 	shadowCapsules := make([]message.ShadowCapsule, 0)
 	dualReceipts := make([]message.DualAnchorReceipt, 0)
 	rvcs := make([]*message.ReshardingValidityCertificate, 0)
@@ -226,11 +208,6 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) proposePartition() (bool, *m
 	for _, at := range cphm.cdm.AccountStateTx {
 		for i, addr := range at.Addrs {
 			cphm.cdm.ReceivedNewAccountState[addr] = at.AccountState[i]
-		}
-		for i, addr := range at.HydrationAddrs {
-			if i < len(at.HydrationState) {
-				receivedHydrationState[addr] = at.HydrationState[i]
-			}
 		}
 		cphm.cdm.ReceivedNewTx = append(cphm.cdm.ReceivedNewTx, at.Txs...)
 		shadowCapsules = append(shadowCapsules, at.ShadowCapsules...)
@@ -253,18 +230,10 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) proposePartition() (bool, *m
 		atmaddr = append(atmaddr, key)
 		atmAs = append(atmAs, val)
 	}
-	hydAddrs := make([]string, 0)
-	hydStates := make([]*core.AccountState, 0)
-	for key, val := range receivedHydrationState {
-		hydAddrs = append(hydAddrs, key)
-		hydStates = append(hydStates, val)
-	}
 	atm := message.AccountTransferMsg{
 		ModifiedMap:    cphm.cdm.ModifiedMap[cphm.cdm.AccountTransferRound],
 		Addrs:          atmaddr,
 		AccountState:   atmAs,
-		HydrationAddrs: hydAddrs,
-		HydrationState: hydStates,
 		ShadowCapsules: shadowCapsules,
 		DualReceipts:   dualReceipts,
 		RVCs:           rvcs,
@@ -328,24 +297,90 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) accountTransfer_do(atm *mess
 	cphm.cdm.PartitionReady = make(map[uint64]bool)
 	cphm.cdm.P_ReadyLock.Unlock()
 
-	if atm.Algorithm == "ZKSCAR" && cphm.pbftNode.NodeID == uint64(cphm.pbftNode.view.Load()) {
-		for sid, hyd := range cphm.cdm.OutgoingHydration {
-			if hyd == nil || len(hyd.Addrs) == 0 {
-				continue
-			}
-			payload := *hyd
-			go func(target uint64, hm message.AccountHydrationMsg) {
-				time.Sleep(time.Duration(params.Delay+params.JitterRange+200) * time.Millisecond)
-				hb, err := json.Marshal(hm)
-				if err != nil {
-					log.Panic(err)
-				}
-				sendMsg := message.MergeMessage(message.CAccountHydration, hb)
-				broadcastToShard(cphm.pbftNode, target, sendMsg)
-			}(sid, payload)
+	cphm.pbftNode.CurChain.PrintBlockChain()
+}
+
+// handleHydrationRequest handles hydration requests from target shards
+func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) handleHydrationRequest(hr *message.HydrationRequest) {
+	if hr.Algorithm != "ZKSCAR" || hr.FromShard != cphm.pbftNode.ShardID {
+		return
+	}
+
+	addrs := make([]string, 0)
+	states := make([]*core.AccountState, 0)
+	for _, addr := range hr.Addrs {
+		if state, ok := cphm.cdm.SourceCustodyState[addr]; ok {
+			addrs = append(addrs, addr)
+			states = append(states, state)
 		}
 	}
-	cphm.cdm.OutgoingHydration = make(map[uint64]*message.AccountHydrationMsg)
 
-	cphm.pbftNode.CurChain.PrintBlockChain()
+	if len(addrs) == 0 {
+		return
+	}
+
+	hd := message.HydrationData{
+		Algorithm:    "ZKSCAR",
+		EpochTag:     hr.EpochTag,
+		FromShard:    cphm.pbftNode.ShardID,
+		ToShard:      hr.ToShard,
+		Addrs:        addrs,
+		AccountState: states,
+		RVCID:        hr.RVCID,
+	}
+	hb, err := json.Marshal(hd)
+	if err != nil {
+		log.Panic(err)
+	}
+	sendMsg := message.MergeMessage(message.CHydrationData, hb)
+	broadcastToShard(cphm.pbftNode, hr.ToShard, sendMsg)
+}
+
+// handleHydrationData handles hydration data from source shards
+func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) handleHydrationData(hd *message.HydrationData) {
+	if hd.Algorithm != "ZKSCAR" || hd.ToShard != cphm.pbftNode.ShardID {
+		return
+	}
+
+	for i, addr := range hd.Addrs {
+		if i >= len(hd.AccountState) {
+			continue
+		}
+		if shadowState := cphm.pbftNode.CurChain.GetAccountState(addr); shadowState != nil && shadowState.IsShadow() {
+			shadowState.ApplyHydration(hd.AccountState[i])
+			cphm.pbftNode.CurChain.PutAccountState(addr, shadowState)
+			cphm.cdm.HydratedAccounts[addr] = true
+			cphm.cdm.OwnershipTransferred[addr] = false
+		}
+	}
+
+	// Send retirement proof to source shard
+	if cphm.pbftNode.NodeID == uint64(cphm.pbftNode.view.Load()) {
+		rp := buildRetirementProof(hd.EpochTag, hd.FromShard, hd.ToShard, hd.Addrs, hd.RVCID)
+		rb, err := json.Marshal(rp)
+		if err != nil {
+			log.Panic(err)
+		}
+		sendMsg := message.MergeMessage(message.CRetirementProof, rb)
+		broadcastToShard(cphm.pbftNode, hd.FromShard, sendMsg)
+	}
+}
+
+// handleRetirementProof handles retirement proofs from target shards
+func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) handleRetirementProof(rp *message.RetirementProof) {
+	if rp.Algorithm != "ZKSCAR" || rp.FromShard != cphm.pbftNode.ShardID {
+		return
+	}
+	if !validateRetirementProof(rp) {
+		log.Panic("invalid retirement proof")
+	}
+
+	// Delete or freeze old accounts
+	for _, addr := range rp.Addrs {
+		if _, ok := cphm.cdm.SourceCustodyState[addr]; ok {
+			cphm.pbftNode.CurChain.FreezeAccount(addr, rp.EpochTag)
+			cphm.cdm.RetiredAccounts[addr] = true
+			delete(cphm.cdm.SourceCustodyState, addr)
+		}
+	}
 }

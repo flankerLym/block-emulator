@@ -89,8 +89,6 @@ type AccountTransferMsg struct {
 	ModifiedMap    map[string]uint64
 	Addrs          []string
 	AccountState   []*core.AccountState
-	HydrationAddrs []string
-	HydrationState []*core.AccountState
 	ShadowCapsules []ShadowCapsule
 	DualReceipts   []DualAnchorReceipt
 	RVCs           []*ReshardingValidityCertificate
@@ -107,8 +105,6 @@ type PartitionReady struct {
 type AccountStateAndTx struct {
 	Addrs          []string
 	AccountState   []*core.AccountState
-	HydrationAddrs []string
-	HydrationState []*core.AccountState
 	ShadowCapsules []ShadowCapsule
 	DualReceipts   []DualAnchorReceipt
 	RVC            *ReshardingValidityCertificate

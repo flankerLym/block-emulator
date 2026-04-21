@@ -35,6 +35,12 @@ type Data_supportCLPA struct {
 	ShadowCapsulePool     map[string]*message.ShadowCapsule
 	OutgoingHydration     map[uint64]*message.AccountHydrationMsg
 	RetirementProofPool   map[string]*message.RetirementProof
+
+	// Shadow Capsule v2 additions
+	PendingHydrationRequests map[string]*message.HydrationRequest
+	PendingHydrationData     map[string]*message.HydrationData
+	SourceCustodyState       map[string]*core.AccountState
+	RetiredAccounts          map[string]bool
 }
 
 func NewCLPADataSupport() *Data_supportCLPA {
@@ -59,5 +65,11 @@ func NewCLPADataSupport() *Data_supportCLPA {
 		ShadowCapsulePool:     make(map[string]*message.ShadowCapsule),
 		OutgoingHydration:     make(map[uint64]*message.AccountHydrationMsg),
 		RetirementProofPool:   make(map[string]*message.RetirementProof),
+
+		// Shadow Capsule v2 initializations
+		PendingHydrationRequests: make(map[string]*message.HydrationRequest),
+		PendingHydrationData:     make(map[string]*message.HydrationData),
+		SourceCustodyState:       make(map[string]*core.AccountState),
+		RetiredAccounts:          make(map[string]bool),
 	}
 }

@@ -138,3 +138,43 @@ func (as *AccountState) Hash() []byte {
 	h := sha256.Sum256(as.Encode())
 	return h[:]
 }
+
+// IsShadow returns true if the account is in shadow state (ownership transferred but not hydrated)
+func (as *AccountState) IsShadow() bool {
+	return as.OwnershipTransferred && !as.Hydrated && as.PendingHydration
+}
+
+// IsHydrated returns true if the account is fully hydrated
+func (as *AccountState) IsHydrated() bool {
+	return as.Hydrated && !as.PendingHydration
+}
+
+// CanExecuteAsShadow returns true if the account can execute transactions in shadow state
+func (as *AccountState) CanExecuteAsShadow() bool {
+	return as.OwnershipTransferred && (as.Hydrated || as.PendingHydration)
+}
+
+// ApplyHydration applies the full state hydration to the shadow account
+func (as *AccountState) ApplyHydration(fullState *AccountState) {
+	if !as.IsShadow() {
+		return
+	}
+	// Copy full state data
+	as.Nonce = fullState.Nonce
+	as.Balance = cloneBigInt(fullState.Balance)
+	as.StorageRoot = cloneBytes(fullState.StorageRoot)
+	as.CodeHash = cloneBytes(fullState.CodeHash)
+	// Update hydration status
+	as.Hydrated = true
+	as.PendingHydration = false
+}
+
+// BuildRetiredCopy builds a retired copy of the account
+func (as *AccountState) BuildRetiredCopy(epochTag uint64) *AccountState {
+	retired := as.Clone()
+	retired.EpochTag = epochTag
+	retired.OwnershipTransferred = false
+	retired.Hydrated = false
+	retired.PendingHydration = false
+	return retired
+}

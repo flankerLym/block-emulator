@@ -27,6 +27,10 @@ func (cbom *CLPABrokerOutsideModule) HandleMessageOutsidePBFT(msgType message.Me
 		cbom.handlePartitionReady(content)
 	case message.CAccountHydration:
 		cbom.handleAccountHydrationMsg(content)
+	case message.CHydrationRequest:
+		cbom.handleHydrationRequest(content)
+	case message.CHydrationData:
+		cbom.handleHydrationData(content)
 	case message.CRetirementProof:
 		cbom.handleRetirementProofMsg(content)
 	default:
@@ -196,4 +200,30 @@ func (cbom *CLPABrokerOutsideModule) handleRetirementProofMsg(content []byte) {
 		cbom.pbftNode.CurChain.DeleteAccounts(retireAddrs)
 	}
 	cbom.cdm.RetirementProofPool[rp.RVCID] = rp
+}
+
+func (cbom *CLPABrokerOutsideModule) handleHydrationRequest(content []byte) {
+	hr := new(message.HydrationRequest)
+	err := json.Unmarshal(content, hr)
+	if err != nil {
+		log.Panic(err)
+	}
+	cphm := &CLPAPbftInsideExtraHandleMod_forBroker{
+		cdm:      cbom.cdm,
+		pbftNode: cbom.pbftNode,
+	}
+	cphm.handleHydrationRequest(hr)
+}
+
+func (cbom *CLPABrokerOutsideModule) handleHydrationData(content []byte) {
+	hd := new(message.HydrationData)
+	err := json.Unmarshal(content, hd)
+	if err != nil {
+		log.Panic(err)
+	}
+	cphm := &CLPAPbftInsideExtraHandleMod_forBroker{
+		cdm:      cbom.cdm,
+		pbftNode: cbom.pbftNode,
+	}
+	cphm.handleHydrationData(hd)
 }
