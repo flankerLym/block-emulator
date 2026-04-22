@@ -1,0 +1,11 @@
+{
+  "kind": "retirement",
+  "protocol_version": "zkscar-retirement-v1",
+  "circuit_version": "retirement-finality-groth16-v1",
+  "proof_system": "groth16-bn128-strict",
+  "artifacts": {
+    "wasm": "artifacts/retirement_finality/retirement_finality_js/retirement_finality.wasm",
+    "zkey": "artifacts/retirement_finality/retirement_finality_final.zkey",
+    "vkey": "artifacts/retirement_finality/verification_key.json"
+  }
+}
