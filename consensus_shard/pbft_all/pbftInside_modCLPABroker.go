@@ -26,11 +26,22 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) HandleinPropose() (bool, *me
 
 	if cphm.cdm.PartitionOn {
 		cphm.sendPartitionReady()
+		waitTicks := 0
 		for !cphm.getPartitionReady() {
+			waitTicks++
+			if waitTicks%5 == 0 {
+				cphm.pbftNode.pl.Plog.Printf("S%dN%d : still waiting for partition-ready barrier (%d ticks)\n", cphm.pbftNode.ShardID, cphm.pbftNode.NodeID, waitTicks)
+				cphm.sendPartitionReady()
+			}
 			time.Sleep(time.Second)
 		}
 		cphm.sendAccounts_and_Txs()
+		collectTicks := 0
 		for !cphm.getCollectOver() {
+			collectTicks++
+			if collectTicks%5 == 0 {
+				cphm.pbftNode.pl.Plog.Printf("S%dN%d : still waiting for account collection (%d ticks)\n", cphm.pbftNode.ShardID, cphm.pbftNode.NodeID, collectTicks)
+			}
 			time.Sleep(time.Second)
 		}
 		return cphm.proposePartition()
@@ -137,9 +148,11 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) HandleinCommit(cmsg *message
 			if err != nil {
 				log.Panic()
 			}
-			msg_send := message.MergeMessage(message.CSeqIDinfo, sByte)
-			networks.TcpDial(msg_send, cphm.pbftNode.ip_nodeTable[sid][0])
-			cphm.pbftNode.pl.Plog.Printf("S%dN%d : sended sequence ids to %d\n", cphm.pbftNode.ShardID, cphm.pbftNode.NodeID, sid)
+			msgSend := message.MergeMessage(message.CSeqIDinfo, sByte)
+			for nid := uint64(0); nid < cphm.pbftNode.pbftChainConfig.Nodes_perShard; nid++ {
+				networks.TcpDial(msgSend, cphm.pbftNode.ip_nodeTable[sid][nid])
+			}
+			cphm.pbftNode.pl.Plog.Printf("S%dN%d : sended sequence ids to shard %d (all nodes)\n", cphm.pbftNode.ShardID, cphm.pbftNode.NodeID, sid)
 		}
 
 		bim := message.BlockInfoMsg{

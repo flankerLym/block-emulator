@@ -14,15 +14,27 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendPartitionReady() {
 	cphm.cdm.P_ReadyLock.Lock()
 	cphm.cdm.PartitionReady[cphm.pbftNode.ShardID] = true
 	cphm.cdm.P_ReadyLock.Unlock()
+
+	cphm.cdm.ReadySeqLock.Lock()
+	cphm.cdm.ReadySeq[cphm.pbftNode.ShardID] = cphm.pbftNode.sequenceID
+	cphm.cdm.ReadySeqLock.Unlock()
+
 	pr := message.PartitionReady{FromShard: cphm.pbftNode.ShardID, NowSeqID: cphm.pbftNode.sequenceID}
 	pByte, err := json.Marshal(pr)
 	if err != nil {
 		log.Panic()
 	}
 	sendMsg := message.MergeMessage(message.CPartitionReady, pByte)
-	for sid := 0; sid < int(cphm.pbftNode.pbftChainConfig.ShardNums); sid++ {
-		if sid != int(pr.FromShard) {
-			networks.TcpDial(sendMsg, cphm.pbftNode.ip_nodeTable[uint64(sid)][0])
+
+	// Stage-2 stability fix:
+	// fan out partition-ready to every node in every shard so that a later view-change
+	// leader also inherits the ready barrier state.
+	for sid := uint64(0); sid < cphm.pbftNode.pbftChainConfig.ShardNums; sid++ {
+		for nid := uint64(0); nid < cphm.pbftNode.pbftChainConfig.Nodes_perShard; nid++ {
+			if sid == cphm.pbftNode.ShardID && nid == cphm.pbftNode.NodeID {
+				continue
+			}
+			networks.TcpDial(sendMsg, cphm.pbftNode.ip_nodeTable[sid][nid])
 		}
 	}
 	cphm.pbftNode.pl.Plog.Print("Ready for partition\n")
@@ -31,17 +43,18 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendPartitionReady() {
 func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) getPartitionReady() bool {
 	cphm.cdm.P_ReadyLock.Lock()
 	defer cphm.cdm.P_ReadyLock.Unlock()
-	cphm.pbftNode.seqMapLock.Lock()
-	defer cphm.pbftNode.seqMapLock.Unlock()
-	cphm.cdm.ReadySeqLock.Lock()
-	defer cphm.cdm.ReadySeqLock.Unlock()
-	flag := true
-	for sid, val := range cphm.pbftNode.seqIDMap {
-		if rval, ok := cphm.cdm.ReadySeq[sid]; !ok || (rval-1 != val) {
-			flag = false
+
+	// Stage-2 stability fix:
+	// the previous readySeq-vs-seqMap strict equality easily deadlocked once
+	// control messages and sequence-info reached different nodes at slightly
+	// different times. For stage-1/2 cutover, we only require every shard to
+	// explicitly announce readiness before collecting account-transfer payloads.
+	for sid := uint64(0); sid < cphm.pbftNode.pbftChainConfig.ShardNums; sid++ {
+		if !cphm.cdm.PartitionReady[sid] {
+			return false
 		}
 	}
-	return len(cphm.cdm.PartitionReady) == int(cphm.pbftNode.pbftChainConfig.ShardNums) && flag
+	return true
 }
 
 func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendAccounts_and_Txs() {
@@ -147,14 +160,18 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendAccounts_and_Txs() {
 				if err != nil {
 					log.Panic(err)
 				}
-				networks.TcpDial(message.MergeMessage(message.CAccountTransferMsg_broker, aByte), cphm.pbftNode.ip_nodeTable[i][0])
+				for nid := uint64(0); nid < cphm.pbftNode.pbftChainConfig.Nodes_perShard; nid++ {
+					networks.TcpDial(message.MergeMessage(message.CAccountTransferMsg_broker, aByte), cphm.pbftNode.ip_nodeTable[i][nid])
+				}
 			} else {
 				ast := message.AccountStateAndTx{Addrs: addrSend, AccountState: asSend, FromShard: cphm.pbftNode.ShardID, Txs: txSend, Algorithm: "ZKSCAR", Stage: "shadow"}
 				aByte, err := json.Marshal(ast)
 				if err != nil {
 					log.Panic(err)
 				}
-				networks.TcpDial(message.MergeMessage(message.CAccountTransferMsg_broker, aByte), cphm.pbftNode.ip_nodeTable[i][0])
+				for nid := uint64(0); nid < cphm.pbftNode.pbftChainConfig.Nodes_perShard; nid++ {
+					networks.TcpDial(message.MergeMessage(message.CAccountTransferMsg_broker, aByte), cphm.pbftNode.ip_nodeTable[i][nid])
+				}
 			}
 		} else {
 			ast := message.AccountStateAndTx{Addrs: addrSend, AccountState: asSend, FromShard: cphm.pbftNode.ShardID, Txs: txSend}
@@ -162,7 +179,9 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendAccounts_and_Txs() {
 			if err != nil {
 				log.Panic(err)
 			}
-			networks.TcpDial(message.MergeMessage(message.CAccountTransferMsg_broker, aByte), cphm.pbftNode.ip_nodeTable[i][0])
+			for nid := uint64(0); nid < cphm.pbftNode.pbftChainConfig.Nodes_perShard; nid++ {
+				networks.TcpDial(message.MergeMessage(message.CAccountTransferMsg_broker, aByte), cphm.pbftNode.ip_nodeTable[i][nid])
+			}
 		}
 	}
 	i2ctx := message.InnerTx2CrossTx{Txs: txsBeCross}
@@ -265,4 +284,7 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) accountTransfer_do(atm *mess
 	cphm.cdm.P_ReadyLock.Lock()
 	cphm.cdm.PartitionReady = make(map[uint64]bool)
 	cphm.cdm.P_ReadyLock.Unlock()
+	cphm.cdm.ReadySeqLock.Lock()
+	cphm.cdm.ReadySeq = make(map[uint64]uint64)
+	cphm.cdm.ReadySeqLock.Unlock()
 }

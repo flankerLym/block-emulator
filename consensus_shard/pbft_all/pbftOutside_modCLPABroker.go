@@ -3,6 +3,7 @@ package pbft_all
 import (
 	"blockEmulator/consensus_shard/pbft_all/dataSupport"
 	"blockEmulator/message"
+	"blockEmulator/networks"
 	"encoding/json"
 	"log"
 )
@@ -10,6 +11,19 @@ import (
 type CLPABrokerOutsideModule struct {
 	cdm      *dataSupport.Data_supportCLPA
 	pbftNode *PbftConsensusNode
+}
+
+func (cbom *CLPABrokerOutsideModule) forwardWithinShard(msgType message.MessageType, content []byte) {
+	if cbom.pbftNode.NodeID != 0 {
+		return
+	}
+	msgSend := message.MergeMessage(msgType, content)
+	for nid := uint64(0); nid < cbom.pbftNode.pbftChainConfig.Nodes_perShard; nid++ {
+		if nid == cbom.pbftNode.NodeID {
+			continue
+		}
+		networks.TcpDial(msgSend, cbom.pbftNode.ip_nodeTable[cbom.pbftNode.ShardID][nid])
+	}
 }
 
 func (cbom *CLPABrokerOutsideModule) HandleMessageOutsidePBFT(msgType message.MessageType, content []byte) bool {
@@ -53,6 +67,7 @@ func (cbom *CLPABrokerOutsideModule) handleInjectTx(content []byte) {
 		log.Panic(err)
 	}
 	cbom.pbftNode.CurChain.Txpool.AddTxs2Pool(it.Txs)
+	cbom.forwardWithinShard(message.CInject, content)
 }
 
 func (cbom *CLPABrokerOutsideModule) handlePartitionMsg(content []byte) {
@@ -71,6 +86,7 @@ func (cbom *CLPABrokerOutsideModule) handlePartitionMsg(content []byte) {
 		cbom.cdm.ShadowCapsulePool[cap.Addr] = &cp
 	}
 	cbom.cdm.PartitionOn = true
+	cbom.forwardWithinShard(message.CPartitionMsg, content)
 }
 
 func (cbom *CLPABrokerOutsideModule) handlePartitionReady(content []byte) {
