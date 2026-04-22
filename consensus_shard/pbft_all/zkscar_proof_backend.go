@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"strconv"
-	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -47,6 +46,11 @@ type ZKSCARMetricsSnapshot struct {
 	ChunkVerifyMicros      uint64
 	RetirementProofMicros  uint64
 	RetirementVerifyMicros uint64
+
+	ShadowInstallCount     uint64
+	HydrationRequestCount  uint64
+	HydrationChunkCount    uint64
+	HydrationCompleteCount uint64
 }
 
 type zkscarMetrics struct {
@@ -63,6 +67,11 @@ type zkscarMetrics struct {
 	chunkVerifyMicros uint64
 	retProofMicros    uint64
 	retVerifyMicros   uint64
+
+	shadowInstallCount     uint64
+	hydrationRequestCount  uint64
+	hydrationChunkCount    uint64
+	hydrationCompleteCount uint64
 }
 
 var globalZKSCARMetrics = new(zkscarMetrics)
@@ -91,6 +100,38 @@ func (m *zkscarMetrics) record(kind string, proof bool, dur time.Duration) {
 	}
 }
 
+func (m *zkscarMetrics) recordEvent(kind string, delta uint64) {
+	if delta == 0 {
+		return
+	}
+	switch kind {
+	case "shadow_install":
+		atomic.AddUint64(&m.shadowInstallCount, delta)
+	case "hydration_request":
+		atomic.AddUint64(&m.hydrationRequestCount, delta)
+	case "hydration_chunk":
+		atomic.AddUint64(&m.hydrationChunkCount, delta)
+	case "hydration_complete":
+		atomic.AddUint64(&m.hydrationCompleteCount, delta)
+	}
+}
+
+func RecordZKSCARShadowInstall(delta uint64) {
+	globalZKSCARMetrics.recordEvent("shadow_install", delta)
+}
+
+func RecordZKSCARHydrationRequest(delta uint64) {
+	globalZKSCARMetrics.recordEvent("hydration_request", delta)
+}
+
+func RecordZKSCARHydrationChunk(delta uint64) {
+	globalZKSCARMetrics.recordEvent("hydration_chunk", delta)
+}
+
+func RecordZKSCARHydrationComplete(delta uint64) {
+	globalZKSCARMetrics.recordEvent("hydration_complete", delta)
+}
+
 func GetZKSCARMetricsSnapshot() ZKSCARMetricsSnapshot {
 	return ZKSCARMetricsSnapshot{
 		RVCProofCount:          atomic.LoadUint64(&globalZKSCARMetrics.rvcProofCount),
@@ -105,14 +146,18 @@ func GetZKSCARMetricsSnapshot() ZKSCARMetricsSnapshot {
 		ChunkVerifyMicros:      atomic.LoadUint64(&globalZKSCARMetrics.chunkVerifyMicros),
 		RetirementProofMicros:  atomic.LoadUint64(&globalZKSCARMetrics.retProofMicros),
 		RetirementVerifyMicros: atomic.LoadUint64(&globalZKSCARMetrics.retVerifyMicros),
+		ShadowInstallCount:     atomic.LoadUint64(&globalZKSCARMetrics.shadowInstallCount),
+		HydrationRequestCount:  atomic.LoadUint64(&globalZKSCARMetrics.hydrationRequestCount),
+		HydrationChunkCount:    atomic.LoadUint64(&globalZKSCARMetrics.hydrationChunkCount),
+		HydrationCompleteCount: atomic.LoadUint64(&globalZKSCARMetrics.hydrationCompleteCount),
 	}
 }
 
-type zkProofBackend struct {
-	mu sync.Mutex
-}
+type simulatedZKBackend struct{}
 
-var zkBackend = &zkProofBackend{}
+func newSimulatedZKBackend() ZKBackend {
+	return &simulatedZKBackend{}
+}
 
 func stableDigest(parts []string) string {
 	payload, _ := json.Marshal(parts)
@@ -120,7 +165,7 @@ func stableDigest(parts []string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (z *zkProofBackend) BuildRVCProof(rvc *message.ReshardingValidityCertificate) (string, string, []byte, string, string) {
+func (z *simulatedZKBackend) BuildRVCProof(rvc *message.ReshardingValidityCertificate) (string, string, []byte, string, string) {
 	start := time.Now()
 	defer func() { globalZKSCARMetrics.record("rvc", true, time.Since(start)) }()
 
@@ -135,7 +180,7 @@ func (z *zkProofBackend) BuildRVCProof(rvc *message.ReshardingValidityCertificat
 	return "simulated-groth16", "zkscar-rvc-groth16-v1", b, hex.EncodeToString(sum[:]), "deterministic-simulator"
 }
 
-func (z *zkProofBackend) VerifyRVCProof(rvc *message.ReshardingValidityCertificate) bool {
+func (z *simulatedZKBackend) VerifyRVCProof(rvc *message.ReshardingValidityCertificate) bool {
 	start := time.Now()
 	defer func() { globalZKSCARMetrics.record("rvc", false, time.Since(start)) }()
 
@@ -165,7 +210,7 @@ func (z *zkProofBackend) VerifyRVCProof(rvc *message.ReshardingValidityCertifica
 	return payload.Digest == stableDigest(expectedInputs)
 }
 
-func (z *zkProofBackend) BuildChunkProof(commitment, leafHash string, idx, total uint64, siblingPath []string) (string, string) {
+func (z *simulatedZKBackend) BuildChunkProof(commitment, leafHash string, idx, total uint64, siblingPath []string) (string, string) {
 	start := time.Now()
 	defer func() { globalZKSCARMetrics.record("chunk", true, time.Since(start)) }()
 
@@ -184,7 +229,7 @@ func (z *zkProofBackend) BuildChunkProof(commitment, leafHash string, idx, total
 	return "simulated-groth16", string(b)
 }
 
-func (z *zkProofBackend) VerifyChunkProof(proofSystem, verifierKeyID, commitment, leafHash, proof string, idx, total uint64) bool {
+func (z *simulatedZKBackend) VerifyChunkProof(proofSystem, verifierKeyID, commitment, leafHash, proof string, idx, total uint64) bool {
 	start := time.Now()
 	defer func() { globalZKSCARMetrics.record("chunk", false, time.Since(start)) }()
 
@@ -206,7 +251,7 @@ func (z *zkProofBackend) VerifyChunkProof(proofSystem, verifierKeyID, commitment
 	return payload.Digest == stableDigest(items)
 }
 
-func (z *zkProofBackend) BuildRetirementProof(proof *message.RetirementProof, bundle *retirementWitnessBundle) (string, string, []byte, string, string) {
+func (z *simulatedZKBackend) BuildRetirementProof(proof *message.RetirementProof, bundle *retirementWitnessBundle) (string, string, []byte, string, string) {
 	start := time.Now()
 	defer func() { globalZKSCARMetrics.record("retirement", true, time.Since(start)) }()
 
@@ -221,7 +266,7 @@ func (z *zkProofBackend) BuildRetirementProof(proof *message.RetirementProof, bu
 	return "simulated-groth16", "zkscar-retirement-groth16-v1", b, hex.EncodeToString(sum[:]), "deterministic-simulator"
 }
 
-func (z *zkProofBackend) VerifyRetirementProof(proof *message.RetirementProof) bool {
+func (z *simulatedZKBackend) VerifyRetirementProof(proof *message.RetirementProof) bool {
 	start := time.Now()
 	defer func() { globalZKSCARMetrics.record("retirement", false, time.Since(start)) }()
 

@@ -99,7 +99,7 @@ func debtRootForAddr(txs []*core.Transaction, cdm *dataSupport.Data_supportCLPA,
 	return h[:]
 }
 
-func shadowCapsuleDigest(capsules []message.ShadowCapsule) string {
+func shadowCapsuleDigest(capsules []message.ShadowCapsule) string { /* unchanged */
 	parts := make([]string, 0, len(capsules))
 	cp := make([]message.ShadowCapsule, len(capsules))
 	copy(cp, capsules)
@@ -110,16 +110,10 @@ func shadowCapsuleDigest(capsules []message.ShadowCapsule) string {
 		return cp[i].Addr < cp[j].Addr
 	})
 	for _, c := range cp {
-		parts = append(parts,
-			c.Addr+
-				"|"+c.Balance+
-				"|"+hex.EncodeToString(c.CodeHash)+
-				"|"+hex.EncodeToString(c.StorageRoot)+
-				"|"+hex.EncodeToString(c.DebtRoot))
+		parts = append(parts, c.Addr+"|"+c.Balance+"|"+hex.EncodeToString(c.CodeHash)+"|"+hex.EncodeToString(c.StorageRoot)+"|"+hex.EncodeToString(c.DebtRoot))
 	}
 	return stableHashStrings(parts)
 }
-
 func partitionDigestForCapsules(capsules []message.ShadowCapsule) string {
 	parts := make([]string, 0, len(capsules))
 	for _, c := range capsules {
@@ -127,7 +121,6 @@ func partitionDigestForCapsules(capsules []message.ShadowCapsule) string {
 	}
 	return stableHashStrings(parts)
 }
-
 func balanceDigestForCapsules(capsules []message.ShadowCapsule) string {
 	parts := make([]string, 0, len(capsules))
 	for _, c := range capsules {
@@ -135,9 +128,8 @@ func balanceDigestForCapsules(capsules []message.ShadowCapsule) string {
 	}
 	return stableHashStrings(parts)
 }
-
 func uniqueAddrDigestForCapsules(capsules []message.ShadowCapsule) string {
-	seen := make(map[string]bool)
+	seen := map[string]bool{}
 	parts := make([]string, 0, len(capsules))
 	for _, c := range capsules {
 		if seen[c.Addr] {
@@ -148,7 +140,6 @@ func uniqueAddrDigestForCapsules(capsules []message.ShadowCapsule) string {
 	}
 	return stableHashStrings(parts)
 }
-
 func debtWitnessDigestForCapsules(capsules []message.ShadowCapsule) string {
 	parts := make([]string, 0, len(capsules))
 	for _, c := range capsules {
@@ -156,21 +147,13 @@ func debtWitnessDigestForCapsules(capsules []message.ShadowCapsule) string {
 	}
 	return stableHashStrings(parts)
 }
-
 func freezeWitnessDigestForCapsules(epochTag, fromShard, toShard uint64, sourceStateRoot, freezeStateRoot string, capsules []message.ShadowCapsule) string {
 	parts := make([]string, 0, len(capsules))
 	for _, c := range capsules {
-		parts = append(parts,
-			c.Addr+"|"+
-				strconv.FormatUint(epochTag, 10)+"|"+
-				strconv.FormatUint(fromShard, 10)+"|"+
-				strconv.FormatUint(toShard, 10)+"|"+
-				sourceStateRoot+"|"+
-				freezeStateRoot)
+		parts = append(parts, c.Addr+"|"+strconv.FormatUint(epochTag, 10)+"|"+strconv.FormatUint(fromShard, 10)+"|"+strconv.FormatUint(toShard, 10)+"|"+sourceStateRoot+"|"+freezeStateRoot)
 	}
 	return stableHashStrings(parts)
 }
-
 func expectedRVCInputs(rvc *message.ReshardingValidityCertificate) []string {
 	return expectedStrictRVCPublicInputs(rvc)
 }
@@ -182,48 +165,12 @@ func buildBatchRVC(pbftNode *PbftConsensusNode, epochTag, fromShard, toShard uin
 	uniqueDigest := uniqueAddrDigestForCapsules(capsules)
 	debtDigest := debtWitnessDigestForCapsules(capsules)
 	freezeDigest := freezeWitnessDigestForCapsules(epochTag, fromShard, toShard, sourceStateRoot, freezeStateRoot, capsules)
-	idBase := []string{
-		"ZKSCAR",
-		strconv.FormatUint(epochTag, 10),
-		strconv.FormatUint(fromShard, 10),
-		strconv.FormatUint(toShard, 10),
-		sourceStateRoot,
-		freezeStateRoot,
-		capsDigest,
-		partDigest,
-		balDigest,
-		uniqueDigest,
-		debtDigest,
-		freezeDigest,
-		strconv.Itoa(len(capsules)),
-	}
+	idBase := []string{"ZKSCAR", strconv.FormatUint(epochTag, 10), strconv.FormatUint(fromShard, 10), strconv.FormatUint(toShard, 10), sourceStateRoot, freezeStateRoot, capsDigest, partDigest, balDigest, uniqueDigest, debtDigest, freezeDigest, strconv.Itoa(len(capsules))}
 	certID := stableHashStrings(idBase)
 	for i := range capsules {
 		capsules[i].RVCID = certID
 	}
-	rvc := &message.ReshardingValidityCertificate{
-		Algorithm:            "ZKSCAR",
-		ProtocolVersion:      "zkscar-rvc-v3",
-		CircuitVersion:       "rvc-semantic-groth16-v1",
-		EpochTag:             epochTag,
-		FromShard:            fromShard,
-		ToShard:              toShard,
-		CertificateID:        certID,
-		SourceStateRoot:      sourceStateRoot,
-		SourceStateRootType:  "mpt-state-root",
-		FreezeStateRoot:      freezeStateRoot,
-		FreezeStateRootType:  "mpt-state-root",
-		TargetShadowRoot:     "",
-		TargetShadowRootType: "pending-shadow-root",
-		PartitionDigest:      partDigest,
-		CapsuleDigest:        capsDigest,
-		BalanceDigest:        balDigest,
-		UniqueAddrDigest:     uniqueDigest,
-		DebtWitnessDigest:    debtDigest,
-		FreezeWitnessDigest:  freezeDigest,
-		BatchSize:            uint64(len(capsules)),
-		VerifierKeyID:        "zkscar-rvc-groth16-v1",
-	}
+	rvc := &message.ReshardingValidityCertificate{Algorithm: "ZKSCAR", ProtocolVersion: "zkscar-rvc-v3", CircuitVersion: "rvc-semantic-groth16-v1", EpochTag: epochTag, FromShard: fromShard, ToShard: toShard, CertificateID: certID, SourceStateRoot: sourceStateRoot, SourceStateRootType: "mpt-state-root", FreezeStateRoot: freezeStateRoot, FreezeStateRootType: "mpt-state-root", TargetShadowRoot: "", TargetShadowRootType: "pending-shadow-root", PartitionDigest: partDigest, CapsuleDigest: capsDigest, BalanceDigest: balDigest, UniqueAddrDigest: uniqueDigest, DebtWitnessDigest: debtDigest, FreezeWitnessDigest: freezeDigest, BatchSize: uint64(len(capsules)), VerifierKeyID: "zkscar-rvc-groth16-v1"}
 	stateWitnesses, err := buildStateWitnessesForBatch(pbftNode, rvc, capsules)
 	if err != nil {
 		log.Panic(err)
@@ -235,22 +182,10 @@ func buildBatchRVC(pbftNode *PbftConsensusNode, epochTag, fromShard, toShard uin
 		log.Panic(err)
 	}
 	rvc.SemanticWitnesses = semanticWitnesses
-	rvc.SemanticWitnessDigest = buildSemanticWitnessDigest(
-		rvc.EpochTag,
-		rvc.FromShard,
-		rvc.ToShard,
-		rvc.BatchSize,
-		buildWitnessBundleBinding(rvc.WitnessBundleHash),
-		buildCertificateBinding(rvc.CertificateID),
-		semanticWitnesses,
-	)
+	rvc.SemanticWitnessDigest = buildSemanticWitnessDigest(rvc.EpochTag, rvc.FromShard, rvc.ToShard, rvc.BatchSize, buildWitnessBundleBinding(rvc.WitnessBundleHash), buildCertificateBinding(rvc.CertificateID), semanticWitnesses)
 	rvc.PublicInputs = expectedRVCInputs(rvc)
 	proofSystem, verifierKeyID, proofBytes, proofDigest, proofMode := zkBackend.BuildRVCProof(rvc)
-	rvc.ProofSystem = proofSystem
-	rvc.VerifierKeyID = verifierKeyID
-	rvc.ProofBytes = proofBytes
-	rvc.ProofDigest = proofDigest
-	rvc.ProofMode = proofMode
+	rvc.ProofSystem, rvc.VerifierKeyID, rvc.ProofBytes, rvc.ProofDigest, rvc.ProofMode = proofSystem, verifierKeyID, proofBytes, proofDigest, proofMode
 	if rvc.ProofSystem == "" || rvc.VerifierKeyID == "" || len(rvc.ProofBytes) == 0 || rvc.ProofDigest == "" {
 		log.Panic("strict RVC proof generation failed")
 	}
@@ -258,7 +193,7 @@ func buildBatchRVC(pbftNode *PbftConsensusNode, epochTag, fromShard, toShard uin
 }
 
 func validateRVCBatch(rvc *message.ReshardingValidityCertificate, capsules []message.ShadowCapsule) bool {
-	if rvc == nil || rvc.Algorithm != "ZKSCAR" {
+	if rvc == nil || rvc.Algorithm != "ZKSCAR" || uint64(len(capsules)) != rvc.BatchSize {
 		return false
 	}
 	if rvc.ProtocolVersion == "" || rvc.CircuitVersion == "" || rvc.WitnessBundleHash == "" || rvc.SemanticWitnessDigest == "" {
@@ -267,10 +202,7 @@ func validateRVCBatch(rvc *message.ReshardingValidityCertificate, capsules []mes
 	if rvc.SourceStateRoot == "" || rvc.SourceStateRootType == "" || rvc.FreezeStateRoot == "" || rvc.FreezeStateRootType == "" {
 		return false
 	}
-	if uint64(len(capsules)) != rvc.BatchSize {
-		return false
-	}
-	seen := make(map[string]bool)
+	seen := map[string]bool{}
 	for _, cap := range capsules {
 		if cap.RVCID != "" && cap.RVCID != rvc.CertificateID {
 			return false
@@ -289,10 +221,7 @@ func validateRVCBatch(rvc *message.ReshardingValidityCertificate, capsules []mes
 	if freezeWitnessDigestForCapsules(rvc.EpochTag, rvc.FromShard, rvc.ToShard, rvc.SourceStateRoot, rvc.FreezeStateRoot, capsules) != rvc.FreezeWitnessDigest {
 		return false
 	}
-	if !validateStateWitnesses(rvc, capsules) {
-		return false
-	}
-	if !validateSemanticWitnessDigest(rvc, capsules) {
+	if !validateStateWitnesses(rvc, capsules) || !validateSemanticWitnessDigest(rvc, capsules) {
 		return false
 	}
 	expectedInputs := expectedRVCInputs(rvc)
@@ -323,9 +252,7 @@ func validateAccountTransferRVCs(atm *message.AccountTransferMsg) bool {
 	}
 	return true
 }
-
 func receiptKey(txHash []byte) string { return hex.EncodeToString(txHash) }
-
 func buildDualAnchorReceipts(txs []*core.Transaction, fromShard, toShard uint64, epochTag uint64, oldRoot string, rvcID string) []message.DualAnchorReceipt {
 	out := make([]message.DualAnchorReceipt, 0, len(txs))
 	for _, tx := range txs {
@@ -336,7 +263,6 @@ func buildDualAnchorReceipts(txs []*core.Transaction, fromShard, toShard uint64,
 	}
 	return out
 }
-
 func bindShadowRootToReceipts(receipts []message.DualAnchorReceipt, shadowRoot string) []message.DualAnchorReceipt {
 	if len(receipts) == 0 {
 		return receipts
@@ -349,7 +275,6 @@ func bindShadowRootToReceipts(receipts []message.DualAnchorReceipt, shadowRoot s
 	}
 	return out
 }
-
 func indexReceiptForAddress(cdm *dataSupport.Data_supportCLPA, addr, key string) {
 	if addr == "" {
 		return
@@ -359,7 +284,6 @@ func indexReceiptForAddress(cdm *dataSupport.Data_supportCLPA, addr, key string)
 	}
 	cdm.AddressReceiptIndex[addr][key] = true
 }
-
 func indexDualAnchorReceipts(cdm *dataSupport.Data_supportCLPA, receipts []message.DualAnchorReceipt) {
 	for _, receipt := range receipts {
 		rc := receipt
@@ -372,7 +296,6 @@ func indexDualAnchorReceipts(cdm *dataSupport.Data_supportCLPA, receipts []messa
 		}
 	}
 }
-
 func markDualAnchorReceiptSettled(cdm *dataSupport.Data_supportCLPA, txHash []byte) {
 	if len(txHash) == 0 {
 		return
@@ -382,7 +305,6 @@ func markDualAnchorReceiptSettled(cdm *dataSupport.Data_supportCLPA, txHash []by
 		cdm.SettledDualAnchorReceipts[key] = true
 	}
 }
-
 func markDualAnchorReceiptSettledForTx(cdm *dataSupport.Data_supportCLPA, tx *core.Transaction) {
 	if tx == nil {
 		return
@@ -392,20 +314,17 @@ func markDualAnchorReceiptSettledForTx(cdm *dataSupport.Data_supportCLPA, tx *co
 		markDualAnchorReceiptSettled(cdm, tx.RawTxHash)
 	}
 }
-
 func markDualAnchorReceiptsSettledForBlock(cdm *dataSupport.Data_supportCLPA, txs []*core.Transaction) {
 	for _, tx := range txs {
 		markDualAnchorReceiptSettledForTx(cdm, tx)
 	}
 }
-
 func txTouchesAddress(tx *core.Transaction, addr string) bool {
 	if tx == nil || addr == "" {
 		return false
 	}
 	return string(tx.Sender) == addr || string(tx.Recipient) == addr || string(tx.OriginalSender) == addr || string(tx.FinalRecipient) == addr
 }
-
 func txWriteKey(tx *core.Transaction) string {
 	if tx == nil {
 		return ""
@@ -419,7 +338,6 @@ func txWriteKey(tx *core.Transaction) string {
 	}
 	return stringsJoin([]string{"tx", hashHex, string(tx.Sender), string(tx.Recipient), string(tx.OriginalSender), string(tx.FinalRecipient)})
 }
-
 func indexPostCutoverWrite(cdm *dataSupport.Data_supportCLPA, addr, key string) {
 	if cdm == nil || addr == "" || key == "" {
 		return
@@ -429,12 +347,11 @@ func indexPostCutoverWrite(cdm *dataSupport.Data_supportCLPA, addr, key string) 
 	}
 	cdm.PostCutoverWriteSet[addr][key] = true
 }
-
 func recordPostCutoverWritesForBlock(cdm *dataSupport.Data_supportCLPA, txs []*core.Transaction) {
 	if cdm == nil || len(txs) == 0 {
 		return
 	}
-	monitored := make(map[string]bool)
+	monitored := map[string]bool{}
 	for addr := range cdm.SourceCustodyState {
 		monitored[addr] = true
 	}
@@ -456,7 +373,6 @@ func recordPostCutoverWritesForBlock(cdm *dataSupport.Data_supportCLPA, txs []*c
 		}
 	}
 }
-
 func computeDebtRootCleared(cdm *dataSupport.Data_supportCLPA, addr string) bool {
 	keys, ok := cdm.AddressReceiptIndex[addr]
 	if !ok || len(keys) == 0 {
@@ -469,7 +385,6 @@ func computeDebtRootCleared(cdm *dataSupport.Data_supportCLPA, addr string) bool
 	}
 	return true
 }
-
 func computePostCutoverWriteCount(cdm *dataSupport.Data_supportCLPA, addr string) uint64 {
 	keys, ok := cdm.PostCutoverWriteSet[addr]
 	if !ok {
@@ -477,7 +392,6 @@ func computePostCutoverWriteCount(cdm *dataSupport.Data_supportCLPA, addr string
 	}
 	return uint64(len(keys))
 }
-
 func canRetireAddress(cdm *dataSupport.Data_supportCLPA, addr string) bool {
 	if !cdm.HydratedAccounts[addr] {
 		return false
@@ -487,9 +401,8 @@ func canRetireAddress(cdm *dataSupport.Data_supportCLPA, addr string) bool {
 	}
 	return computeDebtRootCleared(cdm, addr)
 }
-
 func collectRetirementCandidatesForBlock(txs []*core.Transaction) []string {
-	set := make(map[string]bool)
+	set := map[string]bool{}
 	for _, tx := range txs {
 		if tx == nil {
 			continue
@@ -510,19 +423,13 @@ func collectRetirementCandidatesForBlock(txs []*core.Transaction) []string {
 	sort.Strings(out)
 	return out
 }
-
 func evaluateRetirementCandidatesForBlock(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_supportCLPA, txs []*core.Transaction, epochTag uint64) {
 	addrs := collectRetirementCandidatesForBlock(txs)
 	for _, addr := range addrs {
 		maybeSendRetirementProof(pbftNode, cdm, addr, epochTag)
 	}
 }
-
-func chunkHash(payload []byte) string {
-	h := sha256.Sum256(payload)
-	return hex.EncodeToString(h[:])
-}
-
+func chunkHash(payload []byte) string { h := sha256.Sum256(payload); return hex.EncodeToString(h[:]) }
 func splitStateIntoChunks(state *core.AccountState, chunkSize uint64) ([][]byte, string, []string, map[uint64][]string) {
 	if chunkSize == 0 {
 		chunkSize = 128
@@ -546,14 +453,12 @@ func splitStateIntoChunks(state *core.AccountState, chunkSize uint64) ([][]byte,
 	root, paths := buildChunkMerkleRoot(hashes)
 	return chunks, root, hashes, paths
 }
-
 func currentStateHeight(pbftNode *PbftConsensusNode) uint64 {
 	if pbftNode == nil || pbftNode.CurChain == nil || pbftNode.CurChain.CurrentBlock == nil {
 		return 0
 	}
 	return uint64(pbftNode.CurChain.CurrentBlock.Header.Number)
 }
-
 func shouldIssueHydrationNow(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_supportCLPA, addr string) bool {
 	if cdm == nil || addr == "" {
 		return false
@@ -570,7 +475,6 @@ func shouldIssueHydrationNow(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_
 	}
 	return currentStateHeight(pbftNode) >= installHeight+uint64(params.ZKSCARHydrationDelayRounds)
 }
-
 func requestHydrationChunk(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_supportCLPA, cap *message.ShadowCapsule, chunkIndex uint64, expectedCommitment string) {
 	if pbftNode.NodeID != uint64(pbftNode.view.Load()) {
 		return
@@ -590,7 +494,6 @@ func requestHydrationChunk(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_su
 		networks.TcpDial(msg, pbftNode.ip_nodeTable[cap.CurrentShard][nid])
 	}
 }
-
 func issueHydrationRequests(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_supportCLPA, caps []message.ShadowCapsule) {
 	if pbftNode.NodeID != uint64(pbftNode.view.Load()) {
 		return
@@ -603,7 +506,6 @@ func issueHydrationRequests(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_s
 		requestHydrationChunk(pbftNode, cdm, &cp, 0, "")
 	}
 }
-
 func issueDeferredHydrationRequests(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_supportCLPA) {
 	if pbftNode == nil || cdm == nil {
 		return
@@ -617,7 +519,6 @@ func issueDeferredHydrationRequests(pbftNode *PbftConsensusNode, cdm *dataSuppor
 	}
 	issueHydrationRequests(pbftNode, cdm, caps)
 }
-
 func handleHydrationRequestCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_supportCLPA, req *message.HydrationRequest) {
 	if pbftNode.NodeID != uint64(pbftNode.view.Load()) {
 		return
@@ -653,7 +554,6 @@ func handleHydrationRequestCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.
 		networks.TcpDial(msg, pbftNode.ip_nodeTable[req.ToShard][nid])
 	}
 }
-
 func handleHydrationDataCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_supportCLPA, data *message.HydrationData) {
 	if chunkHash(data.ChunkPayload) != data.ChunkHash {
 		return
@@ -703,7 +603,6 @@ func handleHydrationDataCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.Dat
 		}
 	}
 }
-
 func handleRetirementProofCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_supportCLPA, proof *message.RetirementProof) {
 	if proof == nil || !proof.Hydrated || !proof.DebtRootCleared {
 		return
@@ -721,10 +620,7 @@ func handleRetirementProofCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.D
 	if _, ok := cdm.SourceCustodyState[proof.Addr]; !ok {
 		return
 	}
-	if !validateRetirementProofAgainstState(cdm, proof, cap) {
-		return
-	}
-	if !zkBackend.VerifyRetirementProof(proof) {
+	if !validateRetirementProofAgainstState(cdm, proof, cap) || !zkBackend.VerifyRetirementProof(proof) {
 		return
 	}
 	cdm.RetirementProofPool[proof.Addr] = proof
@@ -734,7 +630,6 @@ func handleRetirementProofCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.D
 	delete(cdm.PostCutoverWriteSet, proof.Addr)
 	pbftNode.CurChain.DeleteAccounts([]string{proof.Addr})
 }
-
 func maybeSendRetirementProof(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_supportCLPA, addr string, epochTag uint64) {
 	if pbftNode.NodeID != uint64(pbftNode.view.Load()) {
 		return
@@ -755,36 +650,13 @@ func maybeSendRetirementProof(pbftNode *PbftConsensusNode, cdm *dataSupport.Data
 	debtDigest := buildRetirementDebtWitnessDigest(bundle.SettledReceiptKeys, bundle.OutstandingReceiptKeys)
 	noWriteDigest := buildNoWriteWitnessDigest(bundle.PostCutoverWriteKeys)
 	retirementDigest := buildRetirementWitnessDigest(addressBinding, epochTag, cap.CurrentShard, cap.TargetShard, settledCount, outstandingCount, postWriteCount, debtDigest, noWriteDigest, rvcBinding)
-	proof := &message.RetirementProof{
-		Addr:                    addr,
-		EpochTag:                epochTag,
-		FromShard:               cap.CurrentShard,
-		ToShard:                 cap.TargetShard,
-		Hydrated:                true,
-		DebtRootCleared:         computeDebtRootCleared(cdm, addr),
-		SettledReceiptCount:     settledCount,
-		OutstandingReceiptCount: outstandingCount,
-		PostCutoverWriteCount:   postWriteCount,
-		AddressBinding:          addressBinding,
-		RVCBinding:              rvcBinding,
-		DebtWitnessDigest:       debtDigest,
-		NoWriteWitnessDigest:    noWriteDigest,
-		RetirementWitnessDigest: retirementDigest,
-		RVCID:                   cap.RVCID,
-		ProtocolVersion:         "zkscar-retirement-v1",
-		CircuitVersion:          "retirement-finality-groth16-v1",
-		VerifierKeyID:           "zkscar-retirement-groth16-v1",
-	}
+	proof := &message.RetirementProof{Addr: addr, EpochTag: epochTag, FromShard: cap.CurrentShard, ToShard: cap.TargetShard, Hydrated: true, DebtRootCleared: computeDebtRootCleared(cdm, addr), SettledReceiptCount: settledCount, OutstandingReceiptCount: outstandingCount, PostCutoverWriteCount: postWriteCount, AddressBinding: addressBinding, RVCBinding: rvcBinding, DebtWitnessDigest: debtDigest, NoWriteWitnessDigest: noWriteDigest, RetirementWitnessDigest: retirementDigest, RVCID: cap.RVCID, ProtocolVersion: "zkscar-retirement-v1", CircuitVersion: "retirement-finality-groth16-v1", VerifierKeyID: "zkscar-retirement-groth16-v1"}
 	if !proof.DebtRootCleared || proof.OutstandingReceiptCount != 0 || proof.PostCutoverWriteCount != 0 {
 		return
 	}
 	proof.PublicInputs = expectedRetirementPublicInputs(proof)
 	proofSystem, verifierKeyID, proofBytes, proofDigest, proofMode := zkBackend.BuildRetirementProof(proof, bundle)
-	proof.ProofSystem = proofSystem
-	proof.VerifierKeyID = verifierKeyID
-	proof.ProofBytes = proofBytes
-	proof.ProofDigest = proofDigest
-	proof.ProofMode = proofMode
+	proof.ProofSystem, proof.VerifierKeyID, proof.ProofBytes, proof.ProofDigest, proof.ProofMode = proofSystem, verifierKeyID, proofBytes, proofDigest, proofMode
 	if proof.ProofSystem == "" || proof.VerifierKeyID == "" || len(proof.ProofBytes) == 0 || proof.ProofDigest == "" {
 		log.Panic("strict retirement proof generation failed")
 	}
@@ -798,7 +670,6 @@ func maybeSendRetirementProof(pbftNode *PbftConsensusNode, cdm *dataSupport.Data
 		networks.TcpDial(msg, pbftNode.ip_nodeTable[cap.CurrentShard][nid])
 	}
 }
-
 func applyPendingHydration(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_supportCLPA, currentRound uint64) {
 	issueDeferredHydrationRequests(pbftNode, cdm)
 	for addr, data := range cdm.PendingHydrationData {
@@ -808,9 +679,6 @@ func applyPendingHydration(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_su
 		delete(cdm.PendingHydrationData, addr)
 	}
 }
-
-// NOTE: the rest of this file is unchanged control-path logic and transfer orchestration.
-// The following methods are copied from the current branch and only updated where ZK-SCAR proving hooks changed.
 
 func (cphm *CLPAPbftInsideExtraHandleMod) sendPartitionReady() {
 	cphm.cdm.P_ReadyLock.Lock()
@@ -829,7 +697,6 @@ func (cphm *CLPAPbftInsideExtraHandleMod) sendPartitionReady() {
 	}
 	cphm.pbftNode.pl.Plog.Print("Ready for partition\n")
 }
-
 func (cphm *CLPAPbftInsideExtraHandleMod) getPartitionReady() bool {
 	cphm.cdm.P_ReadyLock.Lock()
 	defer cphm.cdm.P_ReadyLock.Unlock()
@@ -845,7 +712,6 @@ func (cphm *CLPAPbftInsideExtraHandleMod) getPartitionReady() bool {
 	}
 	return len(cphm.cdm.PartitionReady) == int(cphm.pbftNode.pbftChainConfig.ShardNums) && flag
 }
-
 func (cphm *CLPAPbftInsideExtraHandleMod) sendAccounts_and_Txs() {
 	accountToFetch := make([]string, 0)
 	lastMapid := len(cphm.cdm.ModifiedMap) - 1
@@ -856,13 +722,20 @@ func (cphm *CLPAPbftInsideExtraHandleMod) sendAccounts_and_Txs() {
 		}
 	}
 	asFetched := cphm.pbftNode.CurChain.FetchAccounts(accountToFetch)
+	if meta != nil && meta.Algorithm == "ZKSCAR" && len(accountToFetch) > 0 {
+		materialized := cphm.pbftNode.CurChain.MaterializeAccountsIfMissing(accountToFetch, asFetched)
+		if len(materialized) > 0 {
+			cphm.pbftNode.pl.Plog.Printf("ZK-SCAR: materialized %d source accounts before RVC proof generation\n", len(materialized))
+			asFetched = cphm.pbftNode.CurChain.FetchAccounts(accountToFetch)
+		}
+	}
 	cphm.pbftNode.CurChain.Txpool.GetLocked()
 	for i := uint64(0); i < cphm.pbftNode.pbftChainConfig.ShardNums; i++ {
 		if i == cphm.pbftNode.ShardID {
 			continue
 		}
 		addrSend := make([]string, 0)
-		addrSet := make(map[string]bool)
+		addrSet := map[string]bool{}
 		asSend := make([]*core.AccountState, 0)
 		shadowCapsules := make([]message.ShadowCapsule, 0)
 		sourceStateRoot := ""
@@ -938,13 +811,11 @@ func (cphm *CLPAPbftInsideExtraHandleMod) sendAccounts_and_Txs() {
 	}
 	cphm.pbftNode.CurChain.Txpool.GetUnlocked()
 }
-
 func (cphm *CLPAPbftInsideExtraHandleMod) getCollectOver() bool {
 	cphm.cdm.CollectLock.Lock()
 	defer cphm.cdm.CollectLock.Unlock()
 	return cphm.cdm.CollectOver
 }
-
 func (cphm *CLPAPbftInsideExtraHandleMod) proposePartition() (bool, *message.Request) {
 	shadowCapsules := make([]message.ShadowCapsule, 0)
 	dualReceipts := make([]message.DualAnchorReceipt, 0)
@@ -979,7 +850,6 @@ func (cphm *CLPAPbftInsideExtraHandleMod) proposePartition() (bool, *message.Req
 	atmbyte := atm.Encode()
 	return true, &message.Request{RequestType: message.PartitionReq, Msg: message.RawMessage{Content: atmbyte}, ReqTime: time.Now()}
 }
-
 func (cphm *CLPAPbftInsideExtraHandleMod) accountTransfer_do(atm *message.AccountTransferMsg) {
 	if atm.Algorithm == "ZKSCAR" && !validateAccountTransferRVCs(atm) {
 		log.Panic("ZK-SCAR RVC validation failed")

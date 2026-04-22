@@ -34,6 +34,10 @@ func (tm *TestModule_ZKSCARProof) OutputRecord() ([]float64, float64) {
 		float64(s.ChunkVerifyMicros),
 		float64(s.RetirementProofMicros),
 		float64(s.RetirementVerifyMicros),
+		float64(s.ShadowInstallCount),
+		float64(s.HydrationRequestCount),
+		float64(s.HydrationChunkCount),
+		float64(s.HydrationCompleteCount),
 	}
 	var total float64
 	for _, v := range records {

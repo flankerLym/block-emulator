@@ -26,6 +26,11 @@ type ZKBackend interface {
 
 type backendDispatch struct{}
 
+type fallbackBackend struct {
+	primary  ZKBackend
+	fallback ZKBackend
+}
+
 type externalRVCProofRequest struct {
 	ProtocolVersion       string   `json:"protocol_version"`
 	CircuitVersion        string   `json:"circuit_version"`
@@ -185,6 +190,68 @@ func retirementBundleB64(bundle *retirementWitnessBundle) string {
 	}
 	raw, _ := json.Marshal(bundle)
 	return base64.StdEncoding.EncodeToString(raw)
+}
+
+func externalBackendRequested() bool {
+	mode := strings.ToLower(strings.TrimSpace(os.Getenv("ZKSCAR_BACKEND_MODE")))
+	return mode == "external" || mode == "strict" || mode == "groth16"
+}
+
+func selectZKBackend() ZKBackend {
+	mode := strings.ToLower(strings.TrimSpace(os.Getenv("ZKSCAR_BACKEND_MODE")))
+	switch mode {
+	case "external", "strict", "groth16":
+		return &backendDispatch{}
+	case "auto":
+		return &fallbackBackend{primary: &backendDispatch{}, fallback: newSimulatedZKBackend()}
+	default:
+		return newSimulatedZKBackend()
+	}
+}
+
+func (b *fallbackBackend) BuildRVCProof(rvc *message.ReshardingValidityCertificate) (string, string, []byte, string, string) {
+	proofSystem, verifierKeyID, proofBytes, proofDigest, proofMode := b.primary.BuildRVCProof(rvc)
+	if proofSystem != "" && verifierKeyID != "" && len(proofBytes) > 0 && proofDigest != "" {
+		return proofSystem, verifierKeyID, proofBytes, proofDigest, proofMode
+	}
+	return b.fallback.BuildRVCProof(rvc)
+}
+
+func (b *fallbackBackend) VerifyRVCProof(rvc *message.ReshardingValidityCertificate) bool {
+	if b.primary.VerifyRVCProof(rvc) {
+		return true
+	}
+	return b.fallback.VerifyRVCProof(rvc)
+}
+
+func (b *fallbackBackend) BuildChunkProof(commitment, hash string, idx, total uint64, siblings []string) (string, string) {
+	proofSystem, proof := b.primary.BuildChunkProof(commitment, hash, idx, total, siblings)
+	if proofSystem != "" && proof != "" {
+		return proofSystem, proof
+	}
+	return b.fallback.BuildChunkProof(commitment, hash, idx, total, siblings)
+}
+
+func (b *fallbackBackend) VerifyChunkProof(proofSystem, verifierKeyID, commitment, hash, proof string, idx, total uint64) bool {
+	if b.primary.VerifyChunkProof(proofSystem, verifierKeyID, commitment, hash, proof, idx, total) {
+		return true
+	}
+	return b.fallback.VerifyChunkProof(proofSystem, verifierKeyID, commitment, hash, proof, idx, total)
+}
+
+func (b *fallbackBackend) BuildRetirementProof(proof *message.RetirementProof, bundle *retirementWitnessBundle) (string, string, []byte, string, string) {
+	proofSystem, verifierKeyID, proofBytes, proofDigest, proofMode := b.primary.BuildRetirementProof(proof, bundle)
+	if proofSystem != "" && verifierKeyID != "" && len(proofBytes) > 0 && proofDigest != "" {
+		return proofSystem, verifierKeyID, proofBytes, proofDigest, proofMode
+	}
+	return b.fallback.BuildRetirementProof(proof, bundle)
+}
+
+func (b *fallbackBackend) VerifyRetirementProof(proof *message.RetirementProof) bool {
+	if b.primary.VerifyRetirementProof(proof) {
+		return true
+	}
+	return b.fallback.VerifyRetirementProof(proof)
 }
 
 func (b *backendDispatch) BuildRVCProof(rvc *message.ReshardingValidityCertificate) (string, string, []byte, string, string) {
@@ -391,7 +458,7 @@ func (b *backendDispatch) VerifyRetirementProof(proof *message.RetirementProof) 
 	return resp.Valid
 }
 
-var zkBackend ZKBackend = &backendDispatch{}
+var zkBackend ZKBackend = selectZKBackend()
 
 func expectedStrictRVCPublicInputs(rvc *message.ReshardingValidityCertificate) []string {
 	return []string{
