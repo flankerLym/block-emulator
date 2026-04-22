@@ -1,11 +1,11 @@
 package pbft_all
 
 import (
-	"blockEmulator/consensus_shard/pbft_all/dataSupport"
 	"blockEmulator/core"
 	"blockEmulator/message"
 	"blockEmulator/networks"
 	"blockEmulator/params"
+	"blockEmulator/tools/zkscar_backend/consensus_shard/pbft_all/dataSupport"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -636,20 +636,44 @@ func handleHydrationDataCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.Dat
 }
 
 func handleRetirementProofCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_supportCLPA, proof *message.RetirementProof) {
-	if !proof.Hydrated || !proof.DebtRootCleared {
+	if proof == nil || !proof.Hydrated || !proof.DebtRootCleared {
 		return
 	}
 	cap, ok := cdm.ShadowCapsulePool[proof.Addr]
 	if !ok || cap == nil {
 		return
 	}
-	if cap.RVCID != proof.RVCID || cap.CurrentShard != proof.FromShard || cap.TargetShard != proof.ToShard || cap.EpochTag != proof.EpochTag {
+	if cap.CurrentShard != proof.FromShard || cap.TargetShard != proof.ToShard || cap.EpochTag != proof.EpochTag {
 		return
 	}
-	if _, ok := cdm.RVCPool[proof.RVCID]; !ok {
+	if cap.RVCID != "" && cap.RVCID != proof.RVCID {
 		return
 	}
 	if _, ok := cdm.SourceCustodyState[proof.Addr]; !ok {
+		return
+	}
+	if proof.ProtocolVersion == "" || proof.CircuitVersion == "" || proof.VerifierKeyID == "" || proof.ProofSystem == "" || len(proof.ProofBytes) == 0 || proof.ProofDigest == "" {
+		return
+	}
+	if proof.AccountBinding != hashTextToFieldString(proof.Addr) {
+		return
+	}
+	if proof.RVCBinding != buildCertificateBinding(proof.RVCID) {
+		return
+	}
+	if proof.RetirementWitnessDigest != buildRetirementWitnessDigest(proof) {
+		return
+	}
+	expectedInputs := buildRetirementPublicInputs(proof)
+	if len(expectedInputs) != len(proof.PublicInputs) {
+		return
+	}
+	for i := range expectedInputs {
+		if expectedInputs[i] != proof.PublicInputs[i] {
+			return
+		}
+	}
+	if !zkBackend.VerifyRetirementProof(proof) {
 		return
 	}
 	cdm.RetirementProofPool[proof.Addr] = proof
@@ -670,10 +694,20 @@ func maybeSendRetirementProof(pbftNode *PbftConsensusNode, cdm *dataSupport.Data
 	if !ok || cap == nil || !canRetireAddress(cdm, addr) {
 		return
 	}
-	proof := &message.RetirementProof{Addr: addr, EpochTag: epochTag, FromShard: cap.CurrentShard, ToShard: cap.TargetShard, Hydrated: true, DebtRootCleared: computeDebtRootCleared(cdm, addr), RVCID: cap.RVCID}
-	if !proof.DebtRootCleared {
+	proof, receiptWitnesses, ok := buildRetirementProofEnvelope(cdm, cap, addr, epochTag)
+	if !ok || proof == nil {
 		return
 	}
+	proofSystem, verifierKeyID, proofBytes, proofDigest, proofMode := zkBackend.BuildRetirementProof(proof, receiptWitnesses, nil)
+	if proofSystem == "" || verifierKeyID == "" || len(proofBytes) == 0 || proofDigest == "" {
+		log.Panic("strict retirement proof generation failed")
+	}
+	proof.ProofSystem = proofSystem
+	proof.VerifierKeyID = verifierKeyID
+	proof.ProofBytes = proofBytes
+	proof.ProofDigest = proofDigest
+	proof.ProofMode = proofMode
+
 	cdm.RetirementProofPool[addr] = proof
 	b, err := json.Marshal(proof)
 	if err != nil {

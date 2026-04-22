@@ -25,13 +25,26 @@ The chunk proof is a Groth16 proof of Merkle membership for the chunk hash under
 
 The payload hash itself is still checked natively in Go, and the zk proof seals the membership statement and basic chunk-range semantics.
 
+### Retirement proof
+The retirement proof is now a real Groth16 proof rather than a placeholder script. It seals the retirement-finality statement over:
+
+- settled receipt count
+- outstanding receipt count
+- no-write count supplied in the statement
+- debt witness digest over the receipt witness list
+- no-write witness digest over the write witness list
+- retirement witness digest bound to the account binding and the RVC binding
+
+In the current patch, the target shard produces the proof from its local retirement witness view, and the source shard verifies the proof bytes and the public inputs before deleting the frozen custody copy.
+
 ## Still native today
+
 These parts are still enforced outside the zk circuit:
 
 - actual MPT membership verification for source / freeze / shadow proofs
 - exact debt journal correctness behind `debtRoot`
-- source-shard post-cutover write exclusion
-- retirement proof semantics
+- source-shard post-cutover write exclusion as a globally complete witness source
+- hydration completeness beyond the local execution path that marks the account as hydrated
 
 ## Toolchain
 

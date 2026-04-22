@@ -20,21 +20,11 @@ type ZKBackend interface {
 	BuildChunkProof(commitment, hash string, idx, total uint64, siblings []string) (proofSystem string, proof string)
 	VerifyChunkProof(proofSystem, verifierKeyID, commitment, hash, proof string, idx, total uint64) bool
 
-	BuildRetirementProof(rp *message.RetirementProof) (proofSystem string, verifierKeyID string, proofBytes []byte, proofDigest string, proofMode string)
-	VerifyRetirementProof(rp *message.RetirementProof) bool
+	BuildRetirementProof(proof *message.RetirementProof, receipts []retirementReceiptWitness, writeKeys []string) (proofSystem string, verifierKeyID string, proofBytes []byte, proofDigest string, proofMode string)
+	VerifyRetirementProof(proof *message.RetirementProof) bool
 }
 
 type backendDispatch struct{}
-
-func (b *backendDispatch) BuildRetirementProof(rp *message.RetirementProof) (proofSystem string, verifierKeyID string, proofBytes []byte, proofDigest string, proofMode string) {
-	//TODO implement me
-	panic("implement me")
-}
-
-func (b *backendDispatch) VerifyRetirementProof(rp *message.RetirementProof) bool {
-	//TODO implement me
-	panic("implement me")
-}
 
 type externalRVCProofRequest struct {
 	ProtocolVersion       string   `json:"protocol_version"`
@@ -70,6 +60,35 @@ type externalChunkProofRequest struct {
 
 	ProofSystem string `json:"proof_system,omitempty"`
 	Proof       string `json:"proof,omitempty"`
+}
+
+type externalRetirementProofRequest struct {
+	ProtocolVersion         string                     `json:"protocol_version"`
+	CircuitVersion          string                     `json:"circuit_version"`
+	VerifierKeyID           string                     `json:"verifier_key_id"`
+	Addr                    string                     `json:"addr"`
+	AccountBinding          string                     `json:"account_binding"`
+	RVCID                   string                     `json:"rvc_id"`
+	RVCBinding              string                     `json:"rvc_binding"`
+	EpochTag                uint64                     `json:"epoch_tag"`
+	FromShard               uint64                     `json:"from_shard"`
+	ToShard                 uint64                     `json:"to_shard"`
+	HydratedFlag            bool                       `json:"hydrated_flag"`
+	DebtRootClearedFlag     bool                       `json:"debt_root_cleared_flag"`
+	SettledReceiptCount     uint64                     `json:"settled_receipt_count"`
+	OutstandingReceiptCount uint64                     `json:"outstanding_receipt_count"`
+	PostCutoverWriteCount   uint64                     `json:"post_cutover_write_count"`
+	DebtWitnessDigest       string                     `json:"debt_witness_digest"`
+	NoWriteWitnessDigest    string                     `json:"no_write_witness_digest"`
+	RetirementWitnessDigest string                     `json:"retirement_witness_digest"`
+	PublicInputs            []string                   `json:"public_inputs"`
+	ReceiptWitnesses        []retirementReceiptWitness `json:"receipt_witnesses,omitempty"`
+	WriteKeys               []string                   `json:"write_keys,omitempty"`
+
+	ProofSystem   string `json:"proof_system,omitempty"`
+	ProofDigest   string `json:"proof_digest,omitempty"`
+	ProofMode     string `json:"proof_mode,omitempty"`
+	ProofBytesB64 string `json:"proof_bytes_b64,omitempty"`
 }
 
 type externalProofResponse struct {
@@ -108,6 +127,10 @@ func defaultExternalCommand(kind string) string {
 		return fmt.Sprintf("%s tools/zkscar_backend/chunk_prover.py", pythonBin)
 	case "chunk_verifier":
 		return fmt.Sprintf("%s tools/zkscar_backend/chunk_verifier.py", pythonBin)
+	case "retirement_prover":
+		return fmt.Sprintf("%s tools/zkscar_backend/retirement_prover.py", pythonBin)
+	case "retirement_verifier":
+		return fmt.Sprintf("%s tools/zkscar_backend/retirement_verifier.py", pythonBin)
 	default:
 		return ""
 	}
@@ -269,6 +292,83 @@ func (b *backendDispatch) VerifyChunkProof(proofSystem, verifierKeyID, commitmen
 	return resp.Valid
 }
 
+func (b *backendDispatch) BuildRetirementProof(proof *message.RetirementProof, receipts []retirementReceiptWitness, writeKeys []string) (string, string, []byte, string, string) {
+	command := strings.TrimSpace(os.Getenv("ZKSCAR_EXTERNAL_RETIREMENT_PROVER"))
+	if command == "" {
+		command = defaultExternalCommand("retirement_prover")
+	}
+	resp := new(externalProofResponse)
+	req := &externalRetirementProofRequest{
+		ProtocolVersion:         proof.ProtocolVersion,
+		CircuitVersion:          proof.CircuitVersion,
+		VerifierKeyID:           proof.VerifierKeyID,
+		Addr:                    proof.Addr,
+		AccountBinding:          proof.AccountBinding,
+		RVCID:                   proof.RVCID,
+		RVCBinding:              proof.RVCBinding,
+		EpochTag:                proof.EpochTag,
+		FromShard:               proof.FromShard,
+		ToShard:                 proof.ToShard,
+		HydratedFlag:            proof.Hydrated,
+		DebtRootClearedFlag:     proof.DebtRootCleared,
+		SettledReceiptCount:     proof.SettledReceiptCount,
+		OutstandingReceiptCount: proof.OutstandingReceiptCount,
+		PostCutoverWriteCount:   proof.PostCutoverWriteCount,
+		DebtWitnessDigest:       proof.DebtWitnessDigest,
+		NoWriteWitnessDigest:    proof.NoWriteWitnessDigest,
+		RetirementWitnessDigest: proof.RetirementWitnessDigest,
+		PublicInputs:            proof.PublicInputs,
+		ReceiptWitnesses:        receipts,
+		WriteKeys:               writeKeys,
+	}
+	if err := runExternalBackend(command, req, resp); err != nil || !resp.OK {
+		return "", proof.VerifierKeyID, nil, "", "external-error"
+	}
+	proofBytes, _ := base64.StdEncoding.DecodeString(resp.ProofBytesB64)
+	proofMode := resp.ProofMode
+	if proofMode == "" {
+		proofMode = "external-groth16-retirement-v1"
+	}
+	return resp.ProofSystem, resp.VerifierKeyID, proofBytes, resp.ProofDigest, proofMode
+}
+
+func (b *backendDispatch) VerifyRetirementProof(proof *message.RetirementProof) bool {
+	command := strings.TrimSpace(os.Getenv("ZKSCAR_EXTERNAL_RETIREMENT_VERIFIER"))
+	if command == "" {
+		command = defaultExternalCommand("retirement_verifier")
+	}
+	resp := new(externalProofResponse)
+	req := &externalRetirementProofRequest{
+		ProtocolVersion:         proof.ProtocolVersion,
+		CircuitVersion:          proof.CircuitVersion,
+		VerifierKeyID:           proof.VerifierKeyID,
+		Addr:                    proof.Addr,
+		AccountBinding:          proof.AccountBinding,
+		RVCID:                   proof.RVCID,
+		RVCBinding:              proof.RVCBinding,
+		EpochTag:                proof.EpochTag,
+		FromShard:               proof.FromShard,
+		ToShard:                 proof.ToShard,
+		HydratedFlag:            proof.Hydrated,
+		DebtRootClearedFlag:     proof.DebtRootCleared,
+		SettledReceiptCount:     proof.SettledReceiptCount,
+		OutstandingReceiptCount: proof.OutstandingReceiptCount,
+		PostCutoverWriteCount:   proof.PostCutoverWriteCount,
+		DebtWitnessDigest:       proof.DebtWitnessDigest,
+		NoWriteWitnessDigest:    proof.NoWriteWitnessDigest,
+		RetirementWitnessDigest: proof.RetirementWitnessDigest,
+		PublicInputs:            proof.PublicInputs,
+		ProofSystem:             proof.ProofSystem,
+		ProofDigest:             proof.ProofDigest,
+		ProofMode:               proof.ProofMode,
+		ProofBytesB64:           base64.StdEncoding.EncodeToString(proof.ProofBytes),
+	}
+	if err := runExternalBackend(command, req, resp); err != nil || !resp.OK {
+		return false
+	}
+	return resp.Valid
+}
+
 var zkBackend ZKBackend = &backendDispatch{}
 
 func expectedStrictRVCPublicInputs(rvc *message.ReshardingValidityCertificate) []string {
@@ -280,55 +380,5 @@ func expectedStrictRVCPublicInputs(rvc *message.ReshardingValidityCertificate) [
 		rvc.SemanticWitnessDigest,
 		buildWitnessBundleBinding(rvc.WitnessBundleHash),
 		buildCertificateBinding(rvc.CertificateID),
-	}
-}
-
-type externalRetirementProofRequest struct {
-	ProtocolVersion         string   `json:"protocol_version"`
-	CircuitVersion          string   `json:"circuit_version"`
-	VerifierKeyID           string   `json:"verifier_key_id"`
-	Addr                    string   `json:"addr"`
-	EpochTag                uint64   `json:"epoch_tag"`
-	FromShard               uint64   `json:"from_shard"`
-	ToShard                 uint64   `json:"to_shard"`
-	HydratedFlag            uint64   `json:"hydrated_flag"`
-	DebtRootClearedFlag     uint64   `json:"debt_root_cleared_flag"`
-	SettledReceiptCount     uint64   `json:"settled_receipt_count"`
-	OutstandingReceiptCount uint64   `json:"outstanding_receipt_count"`
-	PostCutoverWriteCount   uint64   `json:"post_cutover_write_count"`
-	DebtWitnessDigest       string   `json:"debt_witness_digest"`
-	NoWriteWitnessDigest    string   `json:"no_write_witness_digest"`
-	RetirementWitnessDigest string   `json:"retirement_witness_digest"`
-	RVCBinding              string   `json:"rvc_binding"`
-	PublicInputs            []string `json:"public_inputs"`
-
-	ProofSystem   string `json:"proof_system,omitempty"`
-	ProofDigest   string `json:"proof_digest,omitempty"`
-	ProofMode     string `json:"proof_mode,omitempty"`
-	ProofBytesB64 string `json:"proof_bytes_b64,omitempty"`
-}
-
-func expectedStrictRetirementPublicInputs(rp *message.RetirementProof) []string {
-	hydratedFlag := "0"
-	if rp.Hydrated {
-		hydratedFlag = "1"
-	}
-	debtClearedFlag := "0"
-	if rp.DebtRootCleared {
-		debtClearedFlag = "1"
-	}
-	return []string{
-		strconv.FormatUint(rp.EpochTag, 10),
-		strconv.FormatUint(rp.FromShard, 10),
-		strconv.FormatUint(rp.ToShard, 10),
-		hydratedFlag,
-		debtClearedFlag,
-		strconv.FormatUint(rp.SettledReceiptCount, 10),
-		strconv.FormatUint(rp.OutstandingReceiptCount, 10),
-		strconv.FormatUint(rp.PostCutoverWriteCount, 10),
-		rp.DebtWitnessDigest,
-		rp.NoWriteWitnessDigest,
-		rp.RetirementWitnessDigest,
-		buildCertificateBinding(rp.RVCID),
 	}
 }

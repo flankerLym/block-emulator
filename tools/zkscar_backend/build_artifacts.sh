@@ -4,7 +4,7 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 ART="$ROOT/artifacts"
 CIR="$ROOT/circuits"
 PTAU="$ART/pot12_final.ptau"
-mkdir -p "$ART/rvc_semantic_batch" "$ART/chunk_membership"
+mkdir -p "$ART/rvc_semantic_batch" "$ART/chunk_membership" "$ART/retirement_finality"
 
 if ! command -v circom >/dev/null 2>&1; then
   echo "circom not found in PATH" >&2
@@ -30,5 +30,10 @@ circom "$CIR/chunk_membership.circom" --r1cs --wasm --sym -o "$ART/chunk_members
 snarkjs groth16 setup "$ART/chunk_membership/chunk_membership.r1cs" "$PTAU" "$ART/chunk_membership/chunk_membership_0000.zkey"
 snarkjs zkey contribute "$ART/chunk_membership/chunk_membership_0000.zkey" "$ART/chunk_membership/chunk_membership_final.zkey" --name="ZKSCAR-CHUNK" -v -e="chunk"
 snarkjs zkey export verificationkey "$ART/chunk_membership/chunk_membership_final.zkey" "$ART/chunk_membership/verification_key.json"
+
+circom "$CIR/retirement_finality.circom" --r1cs --wasm --sym -o "$ART/retirement_finality"
+snarkjs groth16 setup "$ART/retirement_finality/retirement_finality.r1cs" "$PTAU" "$ART/retirement_finality/retirement_finality_0000.zkey"
+snarkjs zkey contribute "$ART/retirement_finality/retirement_finality_0000.zkey" "$ART/retirement_finality/retirement_finality_final.zkey" --name="ZKSCAR-RETIREMENT" -v -e="retirement"
+snarkjs zkey export verificationkey "$ART/retirement_finality/retirement_finality_final.zkey" "$ART/retirement_finality/verification_key.json"
 
 echo "Artifacts built under $ART"
