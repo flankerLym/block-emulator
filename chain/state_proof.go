@@ -8,6 +8,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
+	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/trie"
 )
 
@@ -38,6 +39,27 @@ func hexStringToBytes(s string) ([]byte, error) {
 	return hex.DecodeString(s)
 }
 
+// proveTrieKeyCompat 兼容不同 go-ethereum 版本中的 Prove 签名：
+// 1) Prove(key []byte, proofDb ethdb.KeyValueWriter) error
+// 2) Prove(key []byte, fromLevel uint, proofDb ethdb.KeyValueWriter) error
+func proveTrieKeyCompat(st any, key []byte, proofDB ethdb.KeyValueWriter) error {
+	type prove2Args interface {
+		Prove([]byte, ethdb.KeyValueWriter) error
+	}
+	type prove3Args interface {
+		Prove([]byte, uint, ethdb.KeyValueWriter) error
+	}
+
+	switch t := st.(type) {
+	case prove2Args:
+		return t.Prove(key, proofDB)
+	case prove3Args:
+		return t.Prove(key, 0, proofDB)
+	default:
+		return errors.New("unsupported trie Prove signature")
+	}
+}
+
 func (bc *BlockChain) BuildAccountProofAtStateRoot(root []byte, addr string) (*AccountTrieProof, error) {
 	if len(root) == 0 {
 		return nil, errors.New("empty state root")
@@ -55,7 +77,7 @@ func (bc *BlockChain) BuildAccountProofAtStateRoot(root []byte, addr string) (*A
 		return nil, errors.New("account value missing under supplied root")
 	}
 	proofDB := rawdb.NewMemoryDatabase()
-	if err := st.Prove(key, proofDB); err != nil {
+	if err := proveTrieKeyCompat(st, key, proofDB); err != nil {
 		return nil, err
 	}
 	iter := proofDB.NewIterator(nil, nil)
