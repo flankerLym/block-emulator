@@ -10,13 +10,28 @@ The RVC proof is generated from a private **semantic witness bundle** derived fr
 - source state == shadow capsule base fields (balance / nonce / code hash / storage root)
 - freeze state == source state for the protected fields
 - active witness count == batch size
+- active witness addresses are pairwise unique inside the batch
 - the private semantic witness bundle hashes to the public `semantic_witness_digest`
 - the public statement is bound to `epoch / from shard / to shard / batch size / witness bundle binding / certificate binding`
 
-The native Go verifier still verifies the actual MPT proofs and shadow-account installation. The Groth16 layer seals the semantic transition statement in a real proof instead of a mock digest.
+The native Go verifier still verifies the actual MPT proofs and shadow-account installation. The Groth16 layer now seals the semantic transition statement **and batch uniqueness** in a real proof instead of leaving uniqueness entirely to native logic.
 
 ### Chunk proof
-The chunk proof is a Groth16 proof of Merkle membership for the chunk hash under the public `state_commitment` root. The payload hash itself is still checked natively in Go, and the zk proof seals the membership statement.
+The chunk proof is a Groth16 proof of Merkle membership for the chunk hash under the public `state_commitment` root. The circuit now also enforces:
+
+- `total > 0`
+- `index < total`
+- `total <= 2^DEPTH`
+
+The payload hash itself is still checked natively in Go, and the zk proof seals the membership statement and basic chunk-range semantics.
+
+## Still native today
+These parts are still enforced outside the zk circuit:
+
+- actual MPT membership verification for source / freeze / shadow proofs
+- exact debt journal correctness behind `debtRoot`
+- source-shard post-cutover write exclusion
+- retirement proof semantics
 
 ## Toolchain
 
@@ -41,3 +56,6 @@ cd tools/zkscar_backend
 ```
 
 After artifacts are built, Go will call the Python wrappers automatically.
+
+## Important
+After replacing either circuit file, you **must rebuild artifacts** before running the Go project again.

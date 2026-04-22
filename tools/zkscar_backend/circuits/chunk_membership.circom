@@ -1,18 +1,37 @@
 pragma circom 2.1.6;
 include "./mimc7.circom";
 
-template Num2Bits16() {
+template IsZero() {
     signal input in;
-    signal output out[16];
+    signal output out;
+    signal inv;
+    inv <-- in != 0 ? 1 / in : 0;
+    out <== 1 - in * inv;
+    in * out === 0;
+}
+
+template Num2BitsN(N) {
+    signal input in;
+    signal output out[N];
     var acc = 0;
     var pw = 1;
-    for (var i = 0; i < 16; i++) {
+    for (var i = 0; i < N; i++) {
         out[i] <-- (in >> i) & 1;
         out[i] * (out[i] - 1) === 0;
         acc += out[i] * pw;
         pw *= 2;
     }
     acc === in;
+}
+
+template LessThan(N) {
+    signal input a;
+    signal input b;
+    signal output out;
+
+    component bits = Num2BitsN(N + 1);
+    bits.in <== a + (1 << N) - b;
+    out <== 1 - bits.out[N];
 }
 
 template HashPairMiMCChain() {
@@ -39,7 +58,21 @@ template MerkleMembership(DEPTH) {
     signal input total;
     signal input siblings[DEPTH];
 
-    component bits = Num2Bits16();
+    component totalNonZero = IsZero();
+    totalNonZero.in <== total;
+    totalNonZero.out === 0;
+
+    component indexLtTotal = LessThan(16);
+    indexLtTotal.a <== index;
+    indexLtTotal.b <== total;
+    indexLtTotal.out === 1;
+
+    component totalWithinDepth = LessThan(17);
+    totalWithinDepth.a <== total;
+    totalWithinDepth.b <== (1 << DEPTH) + 1;
+    totalWithinDepth.out === 1;
+
+    component bits = Num2BitsN(16);
     bits.in <== index;
 
     signal level[DEPTH + 1];
@@ -57,11 +90,6 @@ template MerkleMembership(DEPTH) {
     }
 
     level[DEPTH] === root;
-
-    // keep `total` as a public signal bound into the proof transcript;
-    // tree-size semantics are enforced natively when the sender constructs
-    // the sibling path for the requested chunk.
-    total === total;
 }
 
 component main {public [root, leaf, index, total]} = MerkleMembership(16);

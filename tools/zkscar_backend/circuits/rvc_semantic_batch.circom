@@ -1,6 +1,24 @@
 pragma circom 2.1.6;
 include "./mimc7.circom";
 
+template IsZero() {
+    signal input in;
+    signal output out;
+    signal inv;
+    inv <-- in != 0 ? 1 / in : 0;
+    out <== 1 - in * inv;
+    in * out === 0;
+}
+
+template IsEqual() {
+    signal input a;
+    signal input b;
+    signal output out;
+    component iz = IsZero();
+    iz.in <== a - b;
+    out <== iz.out;
+}
+
 template RVCSemanticBatch(MAXB) {
     signal input epochTag;
     signal input fromShard;
@@ -41,6 +59,16 @@ template RVCSemanticBatch(MAXB) {
         sumActive[i + 1] <== sumActive[i] + active[i];
     }
     sumActive[MAXB] === batchSize;
+
+    // New strictness: uniqueness is now enforced inside the circuit.
+    for (var i = 0; i < MAXB; i++) {
+        for (var j = i + 1; j < MAXB; j++) {
+            component eq = IsEqual();
+            eq.a <== addr[i];
+            eq.b <== addr[j];
+            active[i] * active[j] * eq.out === 0;
+        }
+    }
 
     signal meta0; meta0 <== epochTag;
     component h0 = MiMC7();
