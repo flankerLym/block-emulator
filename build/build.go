@@ -53,8 +53,13 @@ func BuildSupervisor(nnm, snm uint64) {
 	}
 	measureMod = append(measureMod, "Tx_Details")
 
+	committeeMethod := params.GetSupervisorCommitteeMethod()
+	if committeeMethod == "ZKSCAR" || committeeMethod == "ZKSCAR_Broker" {
+		measureMod = append(measureMod, "ZKSCAR_Proof")
+	}
+
 	lsn := new(supervisor.Supervisor)
-	lsn.NewSupervisor(params.SupervisorAddr, initConfig(123, nnm, 123, snm), params.GetSupervisorCommitteeMethod(), measureMod...)
+	lsn.NewSupervisor(params.SupervisorAddr, initConfig(123, nnm, 123, snm), committeeMethod, measureMod...)
 	go lsn.TcpListen()
 	time.Sleep(5000 * time.Millisecond)
 	lsn.SupervisorTxHandling()

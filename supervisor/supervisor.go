@@ -90,6 +90,8 @@ func (d *Supervisor) NewSupervisor(ip string, pcc *params.ChainConfig, committee
 			d.testMeasureMods = append(d.testMeasureMods, measure.NewTestTxNumCount_Broker())
 		case "Tx_Details":
 			d.testMeasureMods = append(d.testMeasureMods, measure.NewTestTxDetail())
+		case "ZKSCAR_Proof":
+			d.testMeasureMods = append(d.testMeasureMods, measure.NewTestModule_ZKSCARProof())
 		default:
 		}
 	}
