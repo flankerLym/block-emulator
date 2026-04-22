@@ -14,7 +14,6 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendPartitionReady() {
 	cphm.cdm.P_ReadyLock.Lock()
 	cphm.cdm.PartitionReady[cphm.pbftNode.ShardID] = true
 	cphm.cdm.P_ReadyLock.Unlock()
-
 	pr := message.PartitionReady{FromShard: cphm.pbftNode.ShardID, NowSeqID: cphm.pbftNode.sequenceID}
 	pByte, err := json.Marshal(pr)
 	if err != nil {
@@ -26,6 +25,7 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendPartitionReady() {
 			networks.TcpDial(sendMsg, cphm.pbftNode.ip_nodeTable[uint64(sid)][0])
 		}
 	}
+	cphm.pbftNode.pl.Plog.Print("Ready for partition\n")
 }
 
 func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) getPartitionReady() bool {
@@ -35,7 +35,6 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) getPartitionReady() bool {
 	defer cphm.pbftNode.seqMapLock.Unlock()
 	cphm.cdm.ReadySeqLock.Lock()
 	defer cphm.cdm.ReadySeqLock.Unlock()
-
 	flag := true
 	for sid, val := range cphm.pbftNode.seqIDMap {
 		if rval, ok := cphm.cdm.ReadySeq[sid]; !ok || (rval-1 != val) {
@@ -50,7 +49,6 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendAccounts_and_Txs() {
 	txsBeCross := make([]*core.Transaction, 0)
 	lastMapid := len(cphm.cdm.ModifiedMap) - 1
 	meta := latestPartitionMeta(cphm.cdm)
-
 	for key, val := range cphm.cdm.ModifiedMap[lastMapid] {
 		if val != cphm.pbftNode.ShardID && cphm.pbftNode.CurChain.Get_PartitionMap(key) == cphm.pbftNode.ShardID {
 			accountToFetch = append(accountToFetch, key)
@@ -58,8 +56,6 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendAccounts_and_Txs() {
 	}
 	asFetched := cphm.pbftNode.CurChain.FetchAccounts(accountToFetch)
 	cphm.pbftNode.CurChain.Txpool.GetLocked()
-	defer cphm.pbftNode.CurChain.Txpool.GetUnlocked()
-
 	for i := uint64(0); i < cphm.pbftNode.pbftChainConfig.ShardNums; i++ {
 		if i == cphm.pbftNode.ShardID {
 			continue
@@ -72,41 +68,28 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendAccounts_and_Txs() {
 		if meta != nil && meta.Algorithm == "ZKSCAR" {
 			sourceStateRoot = stateRootHex(cphm.pbftNode.CurChain.CurrentBlock.Header.StateRoot)
 		}
-
 		for idx, addr := range accountToFetch {
-			if cphm.cdm.ModifiedMap[lastMapid][addr] != i {
-				continue
-			}
-			baseState := asFetched[idx]
-			addrSend = append(addrSend, addr)
-			addrSet[addr] = true
-			if meta != nil && meta.Algorithm == "ZKSCAR" {
-				cphm.cdm.SourceCustodyState[addr] = baseState.Clone()
-				cphm.pbftNode.CurChain.FreezeAccount(addr, meta.EpochTag)
-				tmpl := templateCapsule(meta, addr)
-				debtRoot := debtRootForAddr(cphm.pbftNode.CurChain.Txpool.TxQueue, cphm.cdm, addr)
-				cap := message.ShadowCapsule{
-					Addr:         addr,
-					CurrentShard: cphm.pbftNode.ShardID,
-					TargetShard:  i,
-					Balance:      baseState.Balance.String(),
-					Nonce:        baseState.Nonce,
-					CodeHash:     append([]byte(nil), baseState.CodeHash...),
-					StorageRoot:  append([]byte(nil), baseState.StorageRoot...),
-					DebtRoot:     debtRoot,
-					EpochTag:     meta.EpochTag,
+			if cphm.cdm.ModifiedMap[lastMapid][addr] == i {
+				baseState := asFetched[idx]
+				addrSend = append(addrSend, addr)
+				addrSet[addr] = true
+				if meta != nil && meta.Algorithm == "ZKSCAR" {
+					cphm.cdm.SourceCustodyState[addr] = baseState.Clone()
+					cphm.pbftNode.CurChain.FreezeAccount(addr, meta.EpochTag)
+					tmpl := templateCapsule(meta, addr)
+					debtRoot := debtRootForAddr(cphm.pbftNode.CurChain.Txpool.TxQueue, cphm.cdm, addr)
+					cap := message.ShadowCapsule{Addr: addr, CurrentShard: cphm.pbftNode.ShardID, TargetShard: i, Balance: baseState.Balance.String(), Nonce: baseState.Nonce, CodeHash: append([]byte(nil), baseState.CodeHash...), StorageRoot: append([]byte(nil), baseState.StorageRoot...), DebtRoot: debtRoot, EpochTag: meta.EpochTag}
+					if tmpl != nil {
+						cap.Degree = tmpl.Degree
+						cap.Hotness = tmpl.Hotness
+						cap.LocalityGain = tmpl.LocalityGain
+					}
+					shadowCapsules = append(shadowCapsules, cap)
+				} else {
+					asSend = append(asSend, baseState.Clone())
 				}
-				if tmpl != nil {
-					cap.Degree = tmpl.Degree
-					cap.Hotness = tmpl.Hotness
-					cap.LocalityGain = tmpl.LocalityGain
-				}
-				shadowCapsules = append(shadowCapsules, cap)
-			} else {
-				asSend = append(asSend, baseState.Clone())
 			}
 		}
-
 		txSend := make([]*core.Transaction, 0)
 		firstPtr := 0
 		for secondPtr := 0; secondPtr < len(cphm.pbftNode.CurChain.Txpool.TxQueue); secondPtr++ {
@@ -121,8 +104,8 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendAccounts_and_Txs() {
 						beSend = ok2
 						beRemoved = ok2
 					} else {
-						beSend = ok1
 						beRemoved = ok1
+						beSend = ok1
 					}
 				} else if ok1 || ok2 {
 					txsBeCross = append(txsBeCross, ptx)
@@ -132,10 +115,9 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendAccounts_and_Txs() {
 				beSend = ok2
 				beRemoved = ok2
 			} else if string(ptx.OriginalSender) == string(ptx.Sender) {
-				beSend = ok1
 				beRemoved = ok1
+				beSend = ok1
 			}
-
 			if beSend {
 				txSend = append(txSend, ptx)
 			}
@@ -145,30 +127,15 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendAccounts_and_Txs() {
 			}
 		}
 		cphm.pbftNode.CurChain.Txpool.TxQueue = cphm.pbftNode.CurChain.Txpool.TxQueue[:firstPtr]
-
 		if meta != nil && meta.Algorithm == "ZKSCAR" {
 			if len(shadowCapsules) > 0 {
 				freezeStateRoot := stateRootHex(cphm.pbftNode.CurChain.CurrentBlock.Header.StateRoot)
-				payload, err := buildRVCWitnessPayload(cphm.pbftNode.CurChain, shadowCapsules, sourceStateRoot, freezeStateRoot)
-				if err != nil {
-					log.Panic(err)
-				}
-				rvc := buildBatchRVC(meta.EpochTag, cphm.pbftNode.ShardID, i, shadowCapsules, sourceStateRoot, freezeStateRoot, payload)
+				rvc := buildBatchRVC(cphm.pbftNode, meta.EpochTag, cphm.pbftNode.ShardID, i, shadowCapsules, sourceStateRoot, freezeStateRoot)
 				for _, cap := range shadowCapsules {
 					shadowState := cphm.cdm.SourceCustodyState[cap.Addr].BuildShadowState(meta.EpochTag, cphm.pbftNode.ShardID, i, cap.DebtRoot, rvc.CertificateID)
 					asSend = append(asSend, shadowState)
 				}
-				ast := message.AccountStateAndTx{
-					Addrs:          addrSend,
-					AccountState:   asSend,
-					ShadowCapsules: shadowCapsules,
-					FromShard:      cphm.pbftNode.ShardID,
-					Txs:            txSend,
-					Algorithm:      "ZKSCAR",
-					Stage:          "shadow",
-					DualReceipts:   buildDualAnchorReceipts(txSend, cphm.pbftNode.ShardID, i, meta.EpochTag, sourceStateRoot, rvc.CertificateID),
-					RVC:            rvc,
-				}
+				ast := message.AccountStateAndTx{Addrs: addrSend, AccountState: asSend, ShadowCapsules: shadowCapsules, FromShard: cphm.pbftNode.ShardID, Txs: txSend, Algorithm: "ZKSCAR", Stage: "shadow", DualReceipts: buildDualAnchorReceipts(txSend, cphm.pbftNode.ShardID, i, meta.EpochTag, sourceStateRoot, rvc.CertificateID), RVC: rvc}
 				aByte, err := json.Marshal(ast)
 				if err != nil {
 					log.Panic(err)
@@ -191,13 +158,13 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendAccounts_and_Txs() {
 			networks.TcpDial(message.MergeMessage(message.CAccountTransferMsg_broker, aByte), cphm.pbftNode.ip_nodeTable[i][0])
 		}
 	}
-
 	i2ctx := message.InnerTx2CrossTx{Txs: txsBeCross}
 	icByte, err := json.Marshal(i2ctx)
 	if err != nil {
 		log.Panic()
 	}
 	networks.TcpDial(message.MergeMessage(message.CInner2CrossTx, icByte), cphm.pbftNode.ip_nodeTable[params.SupervisorShard][0])
+	cphm.pbftNode.CurChain.Txpool.GetUnlocked()
 }
 
 func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) getCollectOver() bool {
@@ -236,22 +203,9 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) proposePartition() (bool, *m
 		atmaddr = append(atmaddr, key)
 		atmAs = append(atmAs, val)
 	}
-	atm := message.AccountTransferMsg{
-		ModifiedMap:    cphm.cdm.ModifiedMap[cphm.cdm.AccountTransferRound],
-		Addrs:          atmaddr,
-		AccountState:   atmAs,
-		ShadowCapsules: shadowCapsules,
-		DualReceipts:   dualReceipts,
-		RVCs:           rvcs,
-		Algorithm:      algorithm,
-		Stage:          stage,
-		ATid:           uint64(len(cphm.cdm.ModifiedMap)),
-	}
-	return true, &message.Request{
-		RequestType: message.PartitionReq,
-		Msg:         message.RawMessage{Content: atm.Encode()},
-		ReqTime:     time.Now(),
-	}
+	atm := message.AccountTransferMsg{ModifiedMap: cphm.cdm.ModifiedMap[cphm.cdm.AccountTransferRound], Addrs: atmaddr, AccountState: atmAs, ShadowCapsules: shadowCapsules, DualReceipts: dualReceipts, RVCs: rvcs, Algorithm: algorithm, Stage: stage, ATid: uint64(len(cphm.cdm.ModifiedMap))}
+	atmbyte := atm.Encode()
+	return true, &message.Request{RequestType: message.PartitionReq, Msg: message.RawMessage{Content: atmbyte}, ReqTime: time.Now()}
 }
 
 func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) accountTransfer_do(atm *message.AccountTransferMsg) {
@@ -265,9 +219,19 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) accountTransfer_do(atm *mess
 	if atm.Algorithm == "ZKSCAR" {
 		shadowRoot := stateRootHex(cphm.pbftNode.CurChain.CurrentBlock.Header.StateRoot)
 		atm.DualReceipts = bindShadowRootToReceipts(atm.DualReceipts, shadowRoot)
+		groupedCaps := groupShadowCapsulesByRVCID(atm.ShadowCapsules)
 		for _, rvc := range atm.RVCs {
+			caps := groupedCaps[rvc.CertificateID]
 			rvc.TargetShadowRoot = shadowRoot
 			rvc.TargetShadowRootType = "mpt-state-root"
+			shadowWitnesses, err := buildShadowWitnessesForInstalledAccounts(cphm.pbftNode, rvc, caps)
+			if err != nil {
+				log.Panic(err)
+			}
+			rvc.ShadowWitnesses = shadowWitnesses
+			if !validateInstalledShadowAccounts(cphm.pbftNode, rvc, caps) {
+				log.Panic("ZK-SCAR shadow account installation validation failed")
+			}
 			cphm.cdm.RVCPool[rvc.CertificateID] = rvc
 		}
 		for _, cap := range atm.ShadowCapsules {
@@ -275,7 +239,7 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) accountTransfer_do(atm *mess
 			cphm.cdm.ShadowCapsulePool[cap.Addr] = &cp
 			cphm.cdm.OwnershipTransferred[cap.Addr] = true
 			cphm.cdm.HydratedAccounts[cap.Addr] = false
-			cphm.cdm.ShadowInstallHeight[cap.Addr] = cphm.pbftNode.CurChain.CurrentBlock.Header.Number
+			cphm.cdm.ShadowInstallHeight[cap.Addr] = currentStateHeight(cphm.pbftNode)
 		}
 		indexDualAnchorReceipts(cphm.cdm, atm.DualReceipts)
 		issueHydrationRequests(cphm.pbftNode, cphm.cdm, atm.ShadowCapsules)

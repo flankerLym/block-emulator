@@ -1,6 +1,7 @@
 package message
 
 import (
+	"blockEmulator/chain"
 	"blockEmulator/core"
 	"bytes"
 	"encoding/gob"
@@ -31,8 +32,22 @@ type ShadowCapsule struct {
 	RVCID        string
 }
 
+type AccountStateWitness struct {
+	Addr        string
+	SourceProof *chain.AccountTrieProof
+	FreezeProof *chain.AccountTrieProof
+}
+
+type ShadowStateWitness struct {
+	Addr        string
+	ShadowProof *chain.AccountTrieProof
+}
+
 type ReshardingValidityCertificate struct {
-	Algorithm     string
+	Algorithm       string
+	ProtocolVersion string
+	CircuitVersion  string
+
 	EpochTag      uint64
 	FromShard     uint64
 	ToShard       uint64
@@ -52,6 +67,10 @@ type ReshardingValidityCertificate struct {
 	DebtWitnessDigest   string
 	FreezeWitnessDigest string
 	BatchSize           uint64
+	WitnessBundleHash   string
+
+	StateWitnesses  []*AccountStateWitness
+	ShadowWitnesses []*ShadowStateWitness
 
 	ProofSystem   string
 	VerifierKeyID string

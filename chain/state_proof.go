@@ -1,71 +1,120 @@
 package chain
 
 import (
-	"bytes"
-	"fmt"
+	"encoding/hex"
+	"errors"
+	"sort"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/trie"
 )
 
-func cloneProofBytes(b []byte) []byte {
-	if b == nil {
-		return nil
-	}
-	cp := make([]byte, len(b))
-	copy(cp, b)
-	return cp
+type TrieProofNode struct {
+	NodeKeyHex   string `json:"node_key_hex"`
+	NodeValueHex string `json:"node_value_hex"`
 }
 
-// BuildAccountProofAtRoot exports a real trie proof for addr under the provided state root.
-// It returns the encoded account state stored at the leaf plus the exact proof DB key/value pairs.
-func (bc *BlockChain) BuildAccountProofAtRoot(root []byte, addr string) ([]byte, [][]byte, [][]byte, error) {
+type AccountTrieProof struct {
+	Root       string          `json:"root"`
+	RootType   string          `json:"root_type"`
+	TrieKeyHex string          `json:"trie_key_hex"`
+	ValueHex   string          `json:"value_hex"`
+	ProofNodes []TrieProofNode `json:"proof_nodes"`
+}
+
+func normalizeHexString(s string) string {
+	s = strings.TrimSpace(strings.ToLower(s))
+	s = strings.TrimPrefix(s, "0x")
+	return s
+}
+
+func hexStringToBytes(s string) ([]byte, error) {
+	s = normalizeHexString(s)
+	if s == "" {
+		return []byte{}, nil
+	}
+	return hex.DecodeString(s)
+}
+
+func (bc *BlockChain) BuildAccountProofAtStateRoot(root []byte, addr string) (*AccountTrieProof, error) {
 	if len(root) == 0 {
-		return nil, nil, nil, fmt.Errorf("empty state root")
+		return nil, errors.New("empty state root")
 	}
 	st, err := trie.New(trie.TrieID(common.BytesToHash(root)), bc.triedb)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
-	value, err := st.Get([]byte(addr))
+	key := []byte(addr)
+	value, err := st.Get(key)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
+	}
+	if len(value) == 0 {
+		return nil, errors.New("account value missing under supplied root")
 	}
 	proofDB := rawdb.NewMemoryDatabase()
-	if err := st.Prove([]byte(addr), 0, proofDB); err != nil {
-		return nil, nil, nil, err
+	if err := st.Prove(key, proofDB); err != nil {
+		return nil, err
 	}
-
-	keys := make([][]byte, 0)
-	vals := make([][]byte, 0)
-	it := proofDB.NewIterator(nil, nil)
-	defer it.Release()
-	for it.Next() {
-		keys = append(keys, cloneProofBytes(it.Key()))
-		vals = append(vals, cloneProofBytes(it.Value()))
+	iter := proofDB.NewIterator(nil, nil)
+	defer iter.Release()
+	nodes := make([]TrieProofNode, 0)
+	for iter.Next() {
+		nodes = append(nodes, TrieProofNode{
+			NodeKeyHex:   hex.EncodeToString(iter.Key()),
+			NodeValueHex: hex.EncodeToString(iter.Value()),
+		})
 	}
-	return cloneProofBytes(value), keys, vals, nil
+	if err := iter.Error(); err != nil {
+		return nil, err
+	}
+	sort.Slice(nodes, func(i, j int) bool {
+		return nodes[i].NodeKeyHex < nodes[j].NodeKeyHex
+	})
+	return &AccountTrieProof{
+		Root:       hex.EncodeToString(root),
+		RootType:   "mpt-state-root",
+		TrieKeyHex: hex.EncodeToString(key),
+		ValueHex:   hex.EncodeToString(value),
+		ProofNodes: nodes,
+	}, nil
 }
 
-// VerifyAccountProofAtRoot verifies the supplied proof DB key/value pairs under root for addr,
-// and checks that the recovered value matches expectedValue exactly.
-func VerifyAccountProofAtRoot(root []byte, addr string, expectedValue []byte, proofKeys [][]byte, proofVals [][]byte) (bool, error) {
-	if len(root) == 0 {
-		return false, fmt.Errorf("empty state root")
+func VerifyAccountProof(proof *AccountTrieProof) ([]byte, error) {
+	if proof == nil {
+		return nil, errors.New("nil account proof")
 	}
-	if len(proofKeys) != len(proofVals) {
-		return false, fmt.Errorf("proof key/value length mismatch")
+	rootBytes, err := hexStringToBytes(proof.Root)
+	if err != nil {
+		return nil, err
+	}
+	trieKey, err := hexStringToBytes(proof.TrieKeyHex)
+	if err != nil {
+		return nil, err
 	}
 	proofDB := rawdb.NewMemoryDatabase()
-	for i := range proofKeys {
-		if err := proofDB.Put(proofKeys[i], proofVals[i]); err != nil {
-			return false, err
+	for _, node := range proof.ProofNodes {
+		k, err := hexStringToBytes(node.NodeKeyHex)
+		if err != nil {
+			return nil, err
+		}
+		v, err := hexStringToBytes(node.NodeValueHex)
+		if err != nil {
+			return nil, err
+		}
+		if err := proofDB.Put(k, v); err != nil {
+			return nil, err
 		}
 	}
-	got, err := trie.VerifyProof(common.BytesToHash(root), []byte(addr), proofDB)
+	value, err := trie.VerifyProof(common.BytesToHash(rootBytes), trieKey, proofDB)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	return bytes.Equal(got, expectedValue), nil
+	expected := normalizeHexString(proof.ValueHex)
+	if expected != "" && hex.EncodeToString(value) != expected {
+		return nil, errors.New("verified value mismatch")
+	}
+	return value, nil
 }

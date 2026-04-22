@@ -4,269 +4,219 @@ import (
 	"blockEmulator/chain"
 	"blockEmulator/core"
 	"blockEmulator/message"
-	"bytes"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"sort"
-	"sync"
 )
 
-type proofKVJSON struct {
-	Key   string `json:"key"`
-	Value string `json:"value"`
-}
-
-type accountStateWitness struct {
-	Addr         string        `json:"addr"`
-	Root         string        `json:"root"`
-	RootType     string        `json:"root_type"`
-	EncodedState string        `json:"encoded_state_b64"`
-	Proof        []proofKVJSON `json:"proof"`
-}
-
-type rvcStateWitness struct {
-	Schema       string                `json:"schema"`
-	SourceProofs []accountStateWitness `json:"source_proofs"`
-	FreezeProofs []accountStateWitness `json:"freeze_proofs"`
-}
-
-type pendingWitnessSlot struct {
-	mu      sync.Mutex
-	payload *rvcStateWitness
-}
-
-var currentRVCWitness pendingWitnessSlot
-
-func stagePendingRVCWitness(payload *rvcStateWitness) {
-	currentRVCWitness.mu.Lock()
-	defer currentRVCWitness.mu.Unlock()
-	currentRVCWitness.payload = payload
-}
-
-func consumePendingRVCWitness() *rvcStateWitness {
-	currentRVCWitness.mu.Lock()
-	defer currentRVCWitness.mu.Unlock()
-	cp := currentRVCWitness.payload
-	currentRVCWitness.payload = nil
-	return cp
-}
-
-func decodeHexRoot(root string) ([]byte, error) {
-	if root == "" {
-		return nil, fmt.Errorf("empty root")
+func accountStateMatchesCapsuleBase(state *core.AccountState, cap message.ShadowCapsule) bool {
+	if state == nil || state.Balance == nil {
+		return false
 	}
-	return hex.DecodeString(root)
+	if state.Balance.String() != cap.Balance {
+		return false
+	}
+	if state.Nonce != cap.Nonce {
+		return false
+	}
+	if hex.EncodeToString(state.CodeHash) != hex.EncodeToString(cap.CodeHash) {
+		return false
+	}
+	if hex.EncodeToString(state.StorageRoot) != hex.EncodeToString(cap.StorageRoot) {
+		return false
+	}
+	return true
 }
 
-func proofKVToJSON(keys, vals [][]byte) []proofKVJSON {
-	out := make([]proofKVJSON, 0, len(keys))
-	for i := range keys {
-		if i >= len(vals) {
-			break
+func freezeStateMatchesSourceAndEpoch(source, freeze *core.AccountState, epochTag uint64) bool {
+	if source == nil || freeze == nil {
+		return false
+	}
+	if !freeze.Retired || freeze.EpochTag != epochTag {
+		return false
+	}
+	if source.Balance == nil || freeze.Balance == nil || source.Balance.String() != freeze.Balance.String() {
+		return false
+	}
+	if source.Nonce != freeze.Nonce {
+		return false
+	}
+	if hex.EncodeToString(source.CodeHash) != hex.EncodeToString(freeze.CodeHash) {
+		return false
+	}
+	if hex.EncodeToString(source.StorageRoot) != hex.EncodeToString(freeze.StorageRoot) {
+		return false
+	}
+	return true
+}
+
+func shadowStateMatchesCapsule(state *core.AccountState, cap message.ShadowCapsule, rvcID string) bool {
+	if state == nil || !state.IsShadow() {
+		return false
+	}
+	if !accountStateMatchesCapsuleBase(state, cap) {
+		return false
+	}
+	if hex.EncodeToString(state.DebtRoot) != hex.EncodeToString(cap.DebtRoot) {
+		return false
+	}
+	if state.EpochTag != cap.EpochTag || state.SourceShard != cap.CurrentShard || state.TargetShard != cap.TargetShard {
+		return false
+	}
+	if state.LastRVC != rvcID {
+		return false
+	}
+	return true
+}
+
+func buildStateWitnessesForBatch(pbftNode *PbftConsensusNode, rvc *message.ReshardingValidityCertificate, capsules []message.ShadowCapsule) ([]*message.AccountStateWitness, error) {
+	sourceRoot, err := hex.DecodeString(rvc.SourceStateRoot)
+	if err != nil {
+		return nil, err
+	}
+	freezeRoot, err := hex.DecodeString(rvc.FreezeStateRoot)
+	if err != nil {
+		return nil, err
+	}
+	ordered := append([]message.ShadowCapsule(nil), capsules...)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Addr < ordered[j].Addr })
+	witnesses := make([]*message.AccountStateWitness, 0, len(ordered))
+	for _, cap := range ordered {
+		sourceProof, err := pbftNode.CurChain.BuildAccountProofAtStateRoot(sourceRoot, cap.Addr)
+		if err != nil {
+			return nil, err
 		}
-		out = append(out, proofKVJSON{
-			Key:   base64.StdEncoding.EncodeToString(keys[i]),
-			Value: base64.StdEncoding.EncodeToString(vals[i]),
+		freezeProof, err := pbftNode.CurChain.BuildAccountProofAtStateRoot(freezeRoot, cap.Addr)
+		if err != nil {
+			return nil, err
+		}
+		witnesses = append(witnesses, &message.AccountStateWitness{
+			Addr:        cap.Addr,
+			SourceProof: sourceProof,
+			FreezeProof: freezeProof,
 		})
 	}
-	return out
+	return witnesses, nil
 }
 
-func proofKVFromJSON(items []proofKVJSON) ([][]byte, [][]byte, error) {
-	keys := make([][]byte, 0, len(items))
-	vals := make([][]byte, 0, len(items))
-	for _, item := range items {
-		k, err := base64.StdEncoding.DecodeString(item.Key)
-		if err != nil {
-			return nil, nil, err
-		}
-		v, err := base64.StdEncoding.DecodeString(item.Value)
-		if err != nil {
-			return nil, nil, err
-		}
-		keys = append(keys, k)
-		vals = append(vals, v)
+func buildShadowWitnessesForInstalledAccounts(pbftNode *PbftConsensusNode, rvc *message.ReshardingValidityCertificate, capsules []message.ShadowCapsule) ([]*message.ShadowStateWitness, error) {
+	shadowRootHex := rvc.TargetShadowRoot
+	if shadowRootHex == "" {
+		shadowRootHex = stateRootHex(pbftNode.CurChain.CurrentBlock.Header.StateRoot)
 	}
-	return keys, vals, nil
+	shadowRoot, err := hex.DecodeString(shadowRootHex)
+	if err != nil {
+		return nil, err
+	}
+	ordered := append([]message.ShadowCapsule(nil), capsules...)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Addr < ordered[j].Addr })
+	witnesses := make([]*message.ShadowStateWitness, 0, len(ordered))
+	for _, cap := range ordered {
+		proof, err := pbftNode.CurChain.BuildAccountProofAtStateRoot(shadowRoot, cap.Addr)
+		if err != nil {
+			return nil, err
+		}
+		witnesses = append(witnesses, &message.ShadowStateWitness{Addr: cap.Addr, ShadowProof: proof})
+	}
+	return witnesses, nil
 }
 
-func witnessDigest(payload *rvcStateWitness) string {
-	if payload == nil {
-		return ""
+func witnessBundleHash(rvc *message.ReshardingValidityCertificate) string {
+	type serialBundle struct {
+		ProtocolVersion string                         `json:"protocol_version"`
+		CircuitVersion  string                         `json:"circuit_version"`
+		CertificateID   string                         `json:"certificate_id"`
+		SourceStateRoot string                         `json:"source_state_root"`
+		FreezeStateRoot string                         `json:"freeze_state_root"`
+		BatchSize       uint64                         `json:"batch_size"`
+		Witnesses       []*message.AccountStateWitness `json:"witnesses"`
 	}
-	b, _ := json.Marshal(payload)
-	h := sha256.Sum256(b)
+	ws := append([]*message.AccountStateWitness(nil), rvc.StateWitnesses...)
+	sort.Slice(ws, func(i, j int) bool { return ws[i].Addr < ws[j].Addr })
+	bundle := serialBundle{
+		ProtocolVersion: rvc.ProtocolVersion,
+		CircuitVersion:  rvc.CircuitVersion,
+		CertificateID:   rvc.CertificateID,
+		SourceStateRoot: rvc.SourceStateRoot,
+		FreezeStateRoot: rvc.FreezeStateRoot,
+		BatchSize:       rvc.BatchSize,
+		Witnesses:       ws,
+	}
+	raw, _ := json.Marshal(bundle)
+	h := sha256.Sum256(raw)
 	return hex.EncodeToString(h[:])
 }
 
-func buildRVCWitnessPayload(bc *chain.BlockChain, caps []message.ShadowCapsule, sourceRoot, freezeRoot string) (*rvcStateWitness, error) {
-	srcRootBytes, err := decodeHexRoot(sourceRoot)
-	if err != nil {
-		return nil, err
+func validateStateWitnesses(rvc *message.ReshardingValidityCertificate, capsules []message.ShadowCapsule) bool {
+	if rvc == nil || len(rvc.StateWitnesses) != len(capsules) {
+		return false
 	}
-	freezeRootBytes, err := decodeHexRoot(freezeRoot)
-	if err != nil {
-		return nil, err
+	capsByAddr := make(map[string]message.ShadowCapsule, len(capsules))
+	for _, cap := range capsules {
+		capsByAddr[cap.Addr] = cap
 	}
-	cp := make([]message.ShadowCapsule, len(caps))
-	copy(cp, caps)
-	sort.Slice(cp, func(i, j int) bool { return cp[i].Addr < cp[j].Addr })
-
-	payload := &rvcStateWitness{
-		Schema:       "zkscar-real-state-witness-v1",
-		SourceProofs: make([]accountStateWitness, 0, len(cp)),
-		FreezeProofs: make([]accountStateWitness, 0, len(cp)),
-	}
-	for _, cap := range cp {
-		srcState, srcKeys, srcVals, err := bc.BuildAccountProofAtRoot(srcRootBytes, cap.Addr)
+	for _, wit := range rvc.StateWitnesses {
+		cap, ok := capsByAddr[wit.Addr]
+		if !ok || wit == nil || wit.SourceProof == nil || wit.FreezeProof == nil {
+			return false
+		}
+		sourceBytes, err := chain.VerifyAccountProof(wit.SourceProof)
 		if err != nil {
-			return nil, fmt.Errorf("build source proof for %s: %w", cap.Addr, err)
+			return false
 		}
-		if len(srcState) == 0 {
-			return nil, fmt.Errorf("empty source state for %s", cap.Addr)
-		}
-		freezeState, freezeKeys, freezeVals, err := bc.BuildAccountProofAtRoot(freezeRootBytes, cap.Addr)
+		freezeBytes, err := chain.VerifyAccountProof(wit.FreezeProof)
 		if err != nil {
-			return nil, fmt.Errorf("build freeze proof for %s: %w", cap.Addr, err)
+			return false
 		}
-		if len(freezeState) == 0 {
-			return nil, fmt.Errorf("empty freeze state for %s", cap.Addr)
+		sourceState := core.DecodeAS(sourceBytes)
+		freezeState := core.DecodeAS(freezeBytes)
+		if !accountStateMatchesCapsuleBase(sourceState, cap) {
+			return false
 		}
-		payload.SourceProofs = append(payload.SourceProofs, accountStateWitness{
-			Addr:         cap.Addr,
-			Root:         sourceRoot,
-			RootType:     "mpt-state-root",
-			EncodedState: base64.StdEncoding.EncodeToString(srcState),
-			Proof:        proofKVToJSON(srcKeys, srcVals),
-		})
-		payload.FreezeProofs = append(payload.FreezeProofs, accountStateWitness{
-			Addr:         cap.Addr,
-			Root:         freezeRoot,
-			RootType:     "mpt-state-root",
-			EncodedState: base64.StdEncoding.EncodeToString(freezeState),
-			Proof:        proofKVToJSON(freezeKeys, freezeVals),
-		})
+		if !freezeStateMatchesSourceAndEpoch(sourceState, freezeState, rvc.EpochTag) {
+			return false
+		}
 	}
-	return payload, nil
+	return rvc.WitnessBundleHash == witnessBundleHash(rvc)
 }
 
-func compareStateToCapsule(st *core.AccountState, cap message.ShadowCapsule) bool {
-	if st == nil {
+func validateInstalledShadowAccounts(pbftNode *PbftConsensusNode, rvc *message.ReshardingValidityCertificate, capsules []message.ShadowCapsule) bool {
+	if rvc == nil || len(rvc.ShadowWitnesses) != len(capsules) {
 		return false
 	}
-	if st.Balance == nil || st.Balance.String() != cap.Balance {
-		return false
+	capsByAddr := make(map[string]message.ShadowCapsule, len(capsules))
+	for _, cap := range capsules {
+		capsByAddr[cap.Addr] = cap
 	}
-	if st.Nonce != cap.Nonce {
-		return false
-	}
-	if !bytes.Equal(st.CodeHash, cap.CodeHash) {
-		return false
-	}
-	if !bytes.Equal(st.StorageRoot, cap.StorageRoot) {
-		return false
+	for _, wit := range rvc.ShadowWitnesses {
+		cap, ok := capsByAddr[wit.Addr]
+		if !ok || wit == nil || wit.ShadowProof == nil {
+			return false
+		}
+		value, err := chain.VerifyAccountProof(wit.ShadowProof)
+		if err != nil {
+			return false
+		}
+		state := core.DecodeAS(value)
+		if !shadowStateMatchesCapsule(state, cap, rvc.CertificateID) {
+			return false
+		}
+		current := pbftNode.CurChain.GetAccountState(cap.Addr)
+		if !shadowStateMatchesCapsule(current, cap, rvc.CertificateID) {
+			return false
+		}
 	}
 	return true
 }
 
-func compareFreezeToSource(src, frz *core.AccountState, epoch uint64) bool {
-	if src == nil || frz == nil {
-		return false
+func groupShadowCapsulesByRVCID(capsules []message.ShadowCapsule) map[string][]message.ShadowCapsule {
+	out := make(map[string][]message.ShadowCapsule)
+	for _, cap := range capsules {
+		out[cap.RVCID] = append(out[cap.RVCID], cap)
 	}
-	if frz.Balance == nil || src.Balance == nil || frz.Balance.Cmp(src.Balance) != 0 {
-		return false
+	for id := range out {
+		sort.Slice(out[id], func(i, j int) bool { return out[id][i].Addr < out[id][j].Addr })
 	}
-	if frz.Nonce != src.Nonce {
-		return false
-	}
-	if !bytes.Equal(frz.CodeHash, src.CodeHash) || !bytes.Equal(frz.StorageRoot, src.StorageRoot) {
-		return false
-	}
-	if !frz.Retired {
-		return false
-	}
-	if frz.EpochTag != epoch {
-		return false
-	}
-	return true
-}
-
-func validateRVCStateWitness(rvc *message.ReshardingValidityCertificate, caps []message.ShadowCapsule, payload *rvcStateWitness) bool {
-	if payload == nil || payload.Schema == "" {
-		return false
-	}
-	if len(payload.SourceProofs) != len(caps) || len(payload.FreezeProofs) != len(caps) {
-		return false
-	}
-	capMap := make(map[string]message.ShadowCapsule, len(caps))
-	for _, cap := range caps {
-		capMap[cap.Addr] = cap
-	}
-	sourceStates := make(map[string]*core.AccountState, len(caps))
-
-	for _, proof := range payload.SourceProofs {
-		cap, ok := capMap[proof.Addr]
-		if !ok || proof.Root != rvc.SourceStateRoot {
-			return false
-		}
-		stateBytes, err := base64.StdEncoding.DecodeString(proof.EncodedState)
-		if err != nil || len(stateBytes) == 0 {
-			return false
-		}
-		keys, vals, err := proofKVFromJSON(proof.Proof)
-		if err != nil {
-			return false
-		}
-		rootBytes, err := decodeHexRoot(proof.Root)
-		if err != nil {
-			return false
-		}
-		okv, err := chain.VerifyAccountProofAtRoot(rootBytes, proof.Addr, stateBytes, keys, vals)
-		if err != nil || !okv {
-			return false
-		}
-		st := core.DecodeAS(stateBytes)
-		if st == nil || st.Retired {
-			return false
-		}
-		if !compareStateToCapsule(st, cap) {
-			return false
-		}
-		if !bytes.Equal(st.DebtRoot, cap.DebtRoot) && len(cap.DebtRoot) != 0 {
-			// debtRoot is migration-time synthetic data and may not be stored in old state.
-			// So do not require equality here when old state does not carry it.
-		}
-		sourceStates[proof.Addr] = st
-	}
-
-	for _, proof := range payload.FreezeProofs {
-		src, ok := sourceStates[proof.Addr]
-		if !ok || proof.Root != rvc.FreezeStateRoot {
-			return false
-		}
-		stateBytes, err := base64.StdEncoding.DecodeString(proof.EncodedState)
-		if err != nil || len(stateBytes) == 0 {
-			return false
-		}
-		keys, vals, err := proofKVFromJSON(proof.Proof)
-		if err != nil {
-			return false
-		}
-		rootBytes, err := decodeHexRoot(proof.Root)
-		if err != nil {
-			return false
-		}
-		okv, err := chain.VerifyAccountProofAtRoot(rootBytes, proof.Addr, stateBytes, keys, vals)
-		if err != nil || !okv {
-			return false
-		}
-		frz := core.DecodeAS(stateBytes)
-		if !compareFreezeToSource(src, frz, rvc.EpochTag) {
-			return false
-		}
-	}
-	return true
+	return out
 }
