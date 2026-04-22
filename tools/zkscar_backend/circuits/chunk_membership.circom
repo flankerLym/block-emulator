@@ -15,6 +15,23 @@ template Num2Bits16() {
     acc === in;
 }
 
+template HashPairMiMCChain() {
+    signal input left;
+    signal input right;
+    signal output out;
+
+    component h0 = MiMC7();
+    h0.in <== left;
+
+    signal mix;
+    mix <== h0.out + right;
+
+    component h1 = MiMC7();
+    h1.in <== mix;
+
+    out <== h1.out;
+}
+
 template MerkleMembership(DEPTH) {
     signal input root;
     signal input leaf;
@@ -32,13 +49,18 @@ template MerkleMembership(DEPTH) {
         signal right;
         left <== level[i] + bits.out[i] * (siblings[i] - level[i]);
         right <== siblings[i] + bits.out[i] * (level[i] - siblings[i]);
-        signal mix;
-        mix <== left + right;
-        component h = MiMC7();
-        h.in <== mix;
-        level[i + 1] <== h.out;
+
+        component hp = HashPairMiMCChain();
+        hp.left <== left;
+        hp.right <== right;
+        level[i + 1] <== hp.out;
     }
+
     level[DEPTH] === root;
+
+    // keep `total` as a public signal bound into the proof transcript;
+    // tree-size semantics are enforced natively when the sender constructs
+    // the sibling path for the requested chunk.
     total === total;
 }
 

@@ -251,6 +251,9 @@ func buildBatchRVC(pbftNode *PbftConsensusNode, epochTag, fromShard, toShard uin
 	rvc.ProofBytes = proofBytes
 	rvc.ProofDigest = proofDigest
 	rvc.ProofMode = proofMode
+	if rvc.ProofSystem == "" || rvc.VerifierKeyID == "" || len(rvc.ProofBytes) == 0 || rvc.ProofDigest == "" {
+		log.Panic("strict RVC proof generation failed")
+	}
 	return rvc
 }
 
@@ -568,6 +571,9 @@ func handleHydrationRequestCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.
 	idx := req.ChunkIndex
 	payload := chunks[idx]
 	proofSystem, chunkProof := zkBackend.BuildChunkProof(commitment, hashes[idx], idx, uint64(len(chunks)), siblingPaths[idx])
+	if proofSystem == "" || chunkProof == "" {
+		log.Panic("strict chunk proof generation failed")
+	}
 	data := &message.HydrationData{Addr: req.Addr, EpochTag: req.EpochTag, FromShard: req.FromShard, ToShard: req.ToShard, ChunkIndex: idx, ChunkTotal: uint64(len(chunks)), ChunkPayload: payload, ChunkHash: hashes[idx], StateCommitment: commitment, ProofSystem: proofSystem, ChunkProof: chunkProof, IsFinal: idx+1 == uint64(len(chunks))}
 	b, err := json.Marshal(data)
 	if err != nil {
