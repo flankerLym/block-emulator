@@ -122,11 +122,40 @@ func (cbom *CLPABrokerOutsideModule) handleHydrationRequest(content []byte) {
 	handleHydrationRequestCommon(cbom.pbftNode, cbom.cdm, req)
 }
 
+func sameBytes(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func (cbom *CLPABrokerOutsideModule) handleHydrationData(content []byte) {
 	data := new(message.HydrationData)
 	if err := json.Unmarshal(content, data); err != nil {
 		log.Panic(err)
 	}
+
+	cbom.cdm.HydrationLock.Lock()
+	defer cbom.cdm.HydrationLock.Unlock()
+
+	if cbom.cdm.HydratedAccounts[data.Addr] {
+		return
+	}
+
+	if chunkMap, ok := cbom.cdm.PendingHydrationChunks[data.Addr]; ok {
+		if old, exists := chunkMap[data.ChunkIndex]; exists {
+			if sameBytes(old, data.ChunkPayload) {
+				return
+			}
+			return
+		}
+	}
+
 	handleHydrationDataCommon(cbom.pbftNode, cbom.cdm, data)
 }
 

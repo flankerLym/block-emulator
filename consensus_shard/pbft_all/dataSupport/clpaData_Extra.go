@@ -35,8 +35,8 @@ type Data_supportCLPA struct {
 	PendingHydrationCommitments map[string]string
 	PendingHydrationChunkSize   uint64
 
-	// address -> local block height when the shadow account was first installed.
-	// This is used to implement delayed / lazy hydration scheduling.
+	HydrationLock sync.Mutex
+
 	ShadowInstallHeight map[string]uint64
 
 	RVCPool               map[string]*message.ReshardingValidityCertificate
@@ -44,12 +44,9 @@ type Data_supportCLPA struct {
 	ShadowCapsulePool     map[string]*message.ShadowCapsule
 	RetirementProofPool   map[string]*message.RetirementProof
 
-	// address -> receiptKey -> true
-	AddressReceiptIndex map[string]map[string]bool
-	// receiptKey -> settled
+	AddressReceiptIndex       map[string]map[string]bool
 	SettledDualAnchorReceipts map[string]bool
-	// address -> post-cutover write key -> true
-	PostCutoverWriteSet map[string]map[string]bool
+	PostCutoverWriteSet       map[string]map[string]bool
 
 	SourceCustodyState map[string]*core.AccountState
 	RetiredAccounts    map[string]bool

@@ -55,6 +55,13 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendAccounts_and_Txs() {
 		}
 	}
 	asFetched := cphm.pbftNode.CurChain.FetchAccounts(accountToFetch)
+	if meta != nil && meta.Algorithm == "ZKSCAR" && len(accountToFetch) > 0 {
+		materialized := cphm.pbftNode.CurChain.MaterializeAccountsIfMissing(accountToFetch, asFetched)
+		if len(materialized) > 0 {
+			cphm.pbftNode.pl.Plog.Printf("ZK-SCAR broker: materialized %d source accounts before RVC proof generation\n", len(materialized))
+			asFetched = cphm.pbftNode.CurChain.FetchAccounts(accountToFetch)
+		}
+	}
 	cphm.pbftNode.CurChain.Txpool.GetLocked()
 	for i := uint64(0); i < cphm.pbftNode.pbftChainConfig.ShardNums; i++ {
 		if i == cphm.pbftNode.ShardID {

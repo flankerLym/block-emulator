@@ -509,6 +509,53 @@ func (bc *BlockChain) FetchAccounts(addrs []string) []*core.AccountState {
 	return bc.fetchAccountsNoLock(addrs)
 }
 
+// MaterializeAccountsIfMissing makes sure the supplied accounts really exist
+// as trie leaves under the current state root before higher-level code tries to
+// build state proofs for them. FetchAccounts can synthesize a default state for
+// untouched addresses, but proof generation requires the account to be present
+// in the trie, otherwise BuildAccountProofAtStateRoot will fail.
+func (bc *BlockChain) MaterializeAccountsIfMissing(addrs []string, states []*core.AccountState) []string {
+	bc.stateLock.Lock()
+	defer bc.stateLock.Unlock()
+	return bc.materializeAccountsIfMissingNoLock(addrs, states)
+}
+
+func (bc *BlockChain) materializeAccountsIfMissingNoLock(addrs []string, states []*core.AccountState) []string {
+	if len(addrs) == 0 {
+		return nil
+	}
+	st, err := trie.New(trie.TrieID(common.BytesToHash(bc.CurrentBlock.Header.StateRoot)), bc.triedb)
+	if err != nil {
+		log.Panic(err)
+	}
+	materialized := make([]string, 0)
+	changed := false
+	for i, addr := range addrs {
+		if i >= len(states) || states[i] == nil {
+			continue
+		}
+		if bc.Get_PartitionMap(addr) != bc.ChainConfig.ShardID {
+			continue
+		}
+		asenc, err := st.Get([]byte(addr))
+		if err != nil {
+			log.Panic(err)
+		}
+		if len(asenc) != 0 {
+			continue
+		}
+		st.Update([]byte(addr), states[i].Encode())
+		materialized = append(materialized, addr)
+		changed = true
+	}
+	if !changed {
+		return materialized
+	}
+	rt := bc.commitStateTrieNoLock(st)
+	bc.buildEmptyStateBlockNoLock(rt)
+	return materialized
+}
+
 func (bc *BlockChain) CloseBlockChain() {
 	bc.stateLock.Lock()
 	defer bc.stateLock.Unlock()

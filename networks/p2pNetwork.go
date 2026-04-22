@@ -17,15 +17,11 @@ import (
 var connMaplock sync.Mutex
 var connectionPool = make(map[string]net.Conn, 0)
 
-// network params.
 var randomDelayGenerator *rand.Rand
 var rateLimiterDownload *rate.Limiter
 var rateLimiterUpload *rate.Limiter
 
-// Define the latency, jitter and bandwidth here.
-// Init tools.
 func InitNetworkTools() {
-	// avoid wrong params.
 	if params.Delay < 0 {
 		params.Delay = 0
 	}
@@ -36,58 +32,30 @@ func InitNetworkTools() {
 		params.Bandwidth = 0x7fffffff
 	}
 
-	// generate the random seed.
 	randomDelayGenerator = rand.New(rand.NewSource(time.Now().UnixMicro()))
-	// Limit the download rate
 	rateLimiterDownload = rate.NewLimiter(rate.Limit(params.Bandwidth), params.Bandwidth)
-	// Limit the upload rate
 	rateLimiterUpload = rate.NewLimiter(rate.Limit(params.Bandwidth), params.Bandwidth)
 }
 
 func TcpDial(context []byte, addr string) {
 	go func() {
-		// simulate the delay
 		thisDelay := params.Delay
 		if params.JitterRange != 0 {
 			thisDelay = randomDelayGenerator.Intn(params.JitterRange) - params.JitterRange/2 + params.Delay
 		}
 		time.Sleep(time.Millisecond * time.Duration(thisDelay))
 
-		connMaplock.Lock()
-		defer connMaplock.Unlock()
-
-		var err error
-		var conn net.Conn // Define conn here
-
-		// if this connection is not built, build it.
-		if c, ok := connectionPool[addr]; ok {
-			if tcpConn, tcpOk := c.(*net.TCPConn); tcpOk {
-				if err := tcpConn.SetKeepAlive(true); err != nil {
-					delete(connectionPool, addr) // Remove if not alive
-					conn, err = net.Dial("tcp", addr)
-					if err != nil {
-						log.Println("Reconnect error", err)
-						return
-					}
-					connectionPool[addr] = conn
-				} else {
-					conn = c // Use the existing connection
-				}
-			}
-		} else {
-			conn, err = net.Dial("tcp", addr)
-			if err != nil {
-				log.Println("Connect error", err)
-				return
-			}
-			connectionPool[addr] = conn
+		conn, err := net.Dial("tcp", addr)
+		if err != nil {
+			log.Println("Connect error", err)
+			return
 		}
+		defer conn.Close()
 
 		writeToConn(append(context, '\n'), conn, rateLimiterUpload)
 	}()
 }
 
-// Broadcast sends a message to multiple receivers, excluding the sender.
 func Broadcast(sender string, receivers []string, msg []byte) {
 	for _, ip := range receivers {
 		if ip == sender {
@@ -97,7 +65,6 @@ func Broadcast(sender string, receivers []string, msg []byte) {
 	}
 }
 
-// CloseAllConnInPool closes all connections in the connection pool.
 func CloseAllConnInPool() {
 	connMaplock.Lock()
 	defer connMaplock.Unlock()
@@ -105,14 +72,12 @@ func CloseAllConnInPool() {
 	for _, conn := range connectionPool {
 		conn.Close()
 	}
-	connectionPool = make(map[string]net.Conn) // Reset the pool
+	connectionPool = make(map[string]net.Conn)
 }
 
-// ReadFromConn reads data from a connection.
 func ReadFromConn(addr string) {
 	conn := connectionPool[addr]
 
-	// new a conn reader
 	connReader := NewConnReader(conn, rateLimiterDownload)
 
 	buffer := make([]byte, 1024)
@@ -127,20 +92,15 @@ func ReadFromConn(addr string) {
 			break
 		}
 
-		// add message to buffer
 		messageBuffer.Write(buffer[:n])
 
-		// handle the full message
 		for {
 			message, err := readMessage(&messageBuffer)
 			if err == io.ErrShortBuffer {
-				// continue to load if buffer is short
 				break
 			} else if err == nil {
-				// log the full message
 				log.Println("Received from", addr, ":", message)
 			} else {
-				// handle other errs
 				log.Println("Error processing message for address", addr, ":", err)
 				break
 			}
