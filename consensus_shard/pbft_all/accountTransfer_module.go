@@ -99,7 +99,7 @@ func debtRootForAddr(txs []*core.Transaction, cdm *dataSupport.Data_supportCLPA,
 	return h[:]
 }
 
-func shadowCapsuleDigest(capsules []message.ShadowCapsule) string { /* unchanged */
+func shadowCapsuleDigest(capsules []message.ShadowCapsule) string {
 	parts := make([]string, 0, len(capsules))
 	cp := make([]message.ShadowCapsule, len(capsules))
 	copy(cp, capsules)
@@ -584,15 +584,19 @@ func handleHydrationDataCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.Dat
 		fullState := core.DecodeAS(fullBytes)
 		cur := pbftNode.CurChain.GetAccountState(data.Addr)
 		full := cur.ApplyHydration(fullState, data.EpochTag)
-		pbftNode.CurChain.PutAccountState(data.Addr, full)
+
+		// 阶段二共识安全版：
+		// hydration 完成后只缓存 full state / hydrated 标记，
+		// 不直接 PutAccountState 到 CurChain，避免各节点因消息到达时序不同而推进本地空状态块。
+		cdm.HydratedStateCache[data.Addr] = full
 		cdm.HydratedAccounts[data.Addr] = true
+
 		delete(cdm.PendingHydrationData, data.Addr)
 		delete(cdm.PendingHydrationRequests, data.Addr)
 		delete(cdm.PendingHydrationChunks, data.Addr)
 		delete(cdm.PendingHydrationChunkTotal, data.Addr)
 		delete(cdm.PendingHydrationCommitments, data.Addr)
 		delete(cdm.ShadowInstallHeight, data.Addr)
-		maybeSendRetirementProof(pbftNode, cdm, data.Addr, data.EpochTag)
 		return
 	}
 	nextIndex := data.ChunkIndex + 1
@@ -623,61 +627,32 @@ func handleRetirementProofCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.D
 	if !validateRetirementProofAgainstState(cdm, proof, cap) || !zkBackend.VerifyRetirementProof(proof) {
 		return
 	}
+
+	// 阶段二共识安全版：
+	// retirement proof 只缓存，不直接 DeleteAccounts，
+	// 避免 PBFT 外的链状态删除再次导致不同节点 CurrentBlock 偏移。
 	cdm.RetirementProofPool[proof.Addr] = proof
 	cdm.RetiredAccounts[proof.Addr] = true
-	delete(cdm.SourceCustodyState, proof.Addr)
 	delete(cdm.ShadowInstallHeight, proof.Addr)
-	delete(cdm.PostCutoverWriteSet, proof.Addr)
-	pbftNode.CurChain.DeleteAccounts([]string{proof.Addr})
 }
 func maybeSendRetirementProof(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_supportCLPA, addr string, epochTag uint64) {
-	if pbftNode.NodeID != uint64(pbftNode.view.Load()) {
-		return
-	}
-	if _, sent := cdm.RetirementProofPool[addr]; sent {
-		return
-	}
-	cap, ok := cdm.ShadowCapsulePool[addr]
-	if !ok || cap == nil || !canRetireAddress(cdm, addr) {
-		return
-	}
-	bundle := buildRetirementWitnessBundle(cdm, addr)
-	settledCount := uint64(len(bundle.SettledReceiptKeys))
-	outstandingCount := uint64(len(bundle.OutstandingReceiptKeys))
-	postWriteCount := uint64(len(bundle.PostCutoverWriteKeys))
-	addressBinding := buildCertificateBinding(addr)
-	rvcBinding := buildCertificateBinding(cap.RVCID)
-	debtDigest := buildRetirementDebtWitnessDigest(bundle.SettledReceiptKeys, bundle.OutstandingReceiptKeys)
-	noWriteDigest := buildNoWriteWitnessDigest(bundle.PostCutoverWriteKeys)
-	retirementDigest := buildRetirementWitnessDigest(addressBinding, epochTag, cap.CurrentShard, cap.TargetShard, settledCount, outstandingCount, postWriteCount, debtDigest, noWriteDigest, rvcBinding)
-	proof := &message.RetirementProof{Addr: addr, EpochTag: epochTag, FromShard: cap.CurrentShard, ToShard: cap.TargetShard, Hydrated: true, DebtRootCleared: computeDebtRootCleared(cdm, addr), SettledReceiptCount: settledCount, OutstandingReceiptCount: outstandingCount, PostCutoverWriteCount: postWriteCount, AddressBinding: addressBinding, RVCBinding: rvcBinding, DebtWitnessDigest: debtDigest, NoWriteWitnessDigest: noWriteDigest, RetirementWitnessDigest: retirementDigest, RVCID: cap.RVCID, ProtocolVersion: "zkscar-retirement-v1", CircuitVersion: "retirement-finality-groth16-v1", VerifierKeyID: "zkscar-retirement-groth16-v1"}
-	if !proof.DebtRootCleared || proof.OutstandingReceiptCount != 0 || proof.PostCutoverWriteCount != 0 {
-		return
-	}
-	proof.PublicInputs = expectedRetirementPublicInputs(proof)
-	proofSystem, verifierKeyID, proofBytes, proofDigest, proofMode := zkBackend.BuildRetirementProof(proof, bundle)
-	proof.ProofSystem, proof.VerifierKeyID, proof.ProofBytes, proof.ProofDigest, proof.ProofMode = proofSystem, verifierKeyID, proofBytes, proofDigest, proofMode
-	if proof.ProofSystem == "" || proof.VerifierKeyID == "" || len(proof.ProofBytes) == 0 || proof.ProofDigest == "" {
-		log.Panic("strict retirement proof generation failed")
-	}
-	cdm.RetirementProofPool[addr] = proof
-	b, err := json.Marshal(proof)
-	if err != nil {
-		log.Panic(err)
-	}
-	msg := message.MergeMessage(message.CRetirementProof, b)
-	for nid := uint64(0); nid < pbftNode.pbftChainConfig.Nodes_perShard; nid++ {
-		networks.TcpDial(msg, pbftNode.ip_nodeTable[cap.CurrentShard][nid])
-	}
+	_ = pbftNode
+	_ = cdm
+	_ = addr
+	_ = epochTag
+
+	// 阶段二验收版本中，retirement 不再主动发送。
+	// 当前目标是稳定展示“先切换 shadow account、后补齐 hydration”，
+	// 暂不让 retirement 进入消息面和状态面，避免再次引入 PBFT 外链状态变更。
+	return
 }
 func applyPendingHydration(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_supportCLPA, currentRound uint64) {
+	_ = currentRound
+
+	// 阶段二共识安全版：
+	// 这里只保留“延迟 hydration 请求”的调度，不再在 propose 前消费
+	// PendingHydrationData 并写 CurChain。
 	issueDeferredHydrationRequests(pbftNode, cdm)
-	for addr, data := range cdm.PendingHydrationData {
-		if data != nil {
-			handleHydrationDataCommon(pbftNode, cdm, data)
-		}
-		delete(cdm.PendingHydrationData, addr)
-	}
 }
 
 func (cphm *CLPAPbftInsideExtraHandleMod) sendPartitionReady() {

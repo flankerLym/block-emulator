@@ -50,6 +50,11 @@ type Data_supportCLPA struct {
 
 	SourceCustodyState map[string]*core.AccountState
 	RetiredAccounts    map[string]bool
+
+	// 阶段二共识安全版：
+	// hydration 完成后的全量状态仅缓存在内存中，不直接写入 CurChain，
+	// 避免不同节点因收到 HydrationData 的时间差异而推进出不同的本地空状态块。
+	HydratedStateCache map[string]*core.AccountState
 }
 
 func NewCLPADataSupport() *Data_supportCLPA {
@@ -82,5 +87,6 @@ func NewCLPADataSupport() *Data_supportCLPA {
 		PostCutoverWriteSet:         make(map[string]map[string]bool),
 		SourceCustodyState:          make(map[string]*core.AccountState),
 		RetiredAccounts:             make(map[string]bool),
+		HydratedStateCache:          make(map[string]*core.AccountState),
 	}
 }

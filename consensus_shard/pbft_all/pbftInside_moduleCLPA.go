@@ -20,6 +20,8 @@ type CLPAPbftInsideExtraHandleMod struct {
 
 // propose request with different types
 func (cphm *CLPAPbftInsideExtraHandleMod) HandleinPropose() (bool, *message.Request) {
+	// 阶段二共识安全版：
+	// 只保留延迟 hydration 请求的发送，不再通过这条路径写 CurChain。
 	applyPendingHydration(cphm.pbftNode, cphm.cdm, cphm.cdm.AccountTransferRound)
 
 	if cphm.cdm.PartitionOn {

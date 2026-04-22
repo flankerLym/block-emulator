@@ -102,10 +102,9 @@ func (cbom *CLPABrokerOutsideModule) handleAccountStateAndTxMsg(content []byte) 
 			cp := cap
 			cbom.cdm.ShadowCapsulePool[cap.Addr] = &cp
 		}
-		for _, receipt := range at.DualReceipts {
-			rc := receipt
-			cbom.cdm.DualAnchorReceiptPool[string(receipt.TxHash)] = &rc
-		}
+		// 统一和主流程使用相同的 receiptKey(txHash) 索引空间，
+		// 避免 broker 路径下 dual-anchor receipt 后续查询不一致。
+		indexDualAnchorReceipts(cbom.cdm, at.DualReceipts)
 	}
 	if len(cbom.cdm.AccountStateTx) == int(cbom.pbftNode.pbftChainConfig.ShardNums)-1 {
 		cbom.cdm.CollectLock.Lock()

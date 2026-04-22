@@ -19,6 +19,9 @@ type CLPAPbftInsideExtraHandleMod_forBroker struct {
 }
 
 func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) HandleinPropose() (bool, *message.Request) {
+	// 阶段二共识安全版：
+	// 这里仍允许 leader 触发“延迟 hydration 请求”的发送，
+	// 但 applyPendingHydration 已经不再直接写 CurChain，不会再推进本地空状态块。
 	applyPendingHydration(cphm.pbftNode, cphm.cdm, cphm.cdm.AccountTransferRound)
 
 	if cphm.cdm.PartitionOn {

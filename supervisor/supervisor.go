@@ -171,7 +171,6 @@ func (d *Supervisor) handleClientRequest(con net.Conn) {
 			d.handleMessage(clientRequest)
 			d.tcpLock.Unlock()
 		case io.EOF:
-			log.Println("client closed the connection by terminating the process")
 			return
 		default:
 			log.Printf("error: %v\n", err)
