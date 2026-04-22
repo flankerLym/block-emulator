@@ -127,10 +127,12 @@ func (crom *CLPARelayOutsideModule) handleAccountStateAndTxMsg(content []byte) {
 			cp := cap
 			crom.cdm.ShadowCapsulePool[cap.Addr] = &cp
 		}
-		for _, receipt := range at.DualReceipts {
-			rc := receipt
-			crom.cdm.DualAnchorReceiptPool[string(receipt.TxHash)] = &rc
-		}
+		// IMPORTANT:
+		// The rest of the ZK-SCAR pipeline indexes receipts with receiptKey(txHash),
+		// which is hex-encoding based. Using string(receipt.TxHash) here creates a
+		// different key-space and breaks later debt / retirement lookups.
+		// Reuse the same helper to keep the indexing contract consistent.
+		indexDualAnchorReceipts(crom.cdm, at.DualReceipts)
 	}
 	if len(crom.cdm.AccountStateTx) == int(crom.pbftNode.pbftChainConfig.ShardNums)-1 {
 		crom.cdm.CollectLock.Lock()
