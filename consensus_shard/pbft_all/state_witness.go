@@ -122,6 +122,69 @@ func buildShadowWitnessesForInstalledAccounts(pbftNode *PbftConsensusNode, rvc *
 	return witnesses, nil
 }
 
+func buildSemanticWitnessesFromRVC(rvc *message.ReshardingValidityCertificate, capsules []message.ShadowCapsule) ([]*message.RVCSemanticWitness, error) {
+	if rvc == nil || len(rvc.StateWitnesses) != len(capsules) {
+		return nil, nil
+	}
+	capsByAddr := make(map[string]message.ShadowCapsule, len(capsules))
+	for _, cap := range capsules {
+		capsByAddr[cap.Addr] = cap
+	}
+	ordered := make([]*message.AccountStateWitness, len(rvc.StateWitnesses))
+	copy(ordered, rvc.StateWitnesses)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Addr < ordered[j].Addr })
+	out := make([]*message.RVCSemanticWitness, 0, len(ordered))
+	for _, wit := range ordered {
+		cap, ok := capsByAddr[wit.Addr]
+		if !ok || wit == nil || wit.SourceProof == nil || wit.FreezeProof == nil {
+			return nil, nil
+		}
+		sourceBytes, err := chain.VerifyAccountProof(wit.SourceProof)
+		if err != nil {
+			return nil, err
+		}
+		freezeBytes, err := chain.VerifyAccountProof(wit.FreezeProof)
+		if err != nil {
+			return nil, err
+		}
+		sourceState := core.DecodeAS(sourceBytes)
+		freezeState := core.DecodeAS(freezeBytes)
+		out = append(out, &message.RVCSemanticWitness{
+			Addr:                  wit.Addr,
+			SourceBalance:         sourceState.Balance.String(),
+			SourceNonce:           sourceState.Nonce,
+			SourceCodeHashHex:     hex.EncodeToString(sourceState.CodeHash),
+			SourceStorageRootHex:  hex.EncodeToString(sourceState.StorageRoot),
+			FreezeBalance:         freezeState.Balance.String(),
+			FreezeNonce:           freezeState.Nonce,
+			FreezeCodeHashHex:     hex.EncodeToString(freezeState.CodeHash),
+			FreezeStorageRootHex:  hex.EncodeToString(freezeState.StorageRoot),
+			CapsuleBalance:        cap.Balance,
+			CapsuleNonce:          cap.Nonce,
+			CapsuleCodeHashHex:    hex.EncodeToString(cap.CodeHash),
+			CapsuleStorageRootHex: hex.EncodeToString(cap.StorageRoot),
+			DebtRootHex:           hex.EncodeToString(cap.DebtRoot),
+		})
+	}
+	return out, nil
+}
+
+func semanticWitnessDigestForRVC(rvc *message.ReshardingValidityCertificate, capsules []message.ShadowCapsule) (string, error) {
+	semanticWitnesses, err := buildSemanticWitnessesFromRVC(rvc, capsules)
+	if err != nil {
+		return "", err
+	}
+	return buildSemanticWitnessDigest(
+		rvc.EpochTag,
+		rvc.FromShard,
+		rvc.ToShard,
+		rvc.BatchSize,
+		buildWitnessBundleBinding(rvc.WitnessBundleHash),
+		buildCertificateBinding(rvc.CertificateID),
+		semanticWitnesses,
+	), nil
+}
+
 func witnessBundleHash(rvc *message.ReshardingValidityCertificate) string {
 	type serialBundle struct {
 		ProtocolVersion string                         `json:"protocol_version"`
@@ -208,6 +271,17 @@ func validateInstalledShadowAccounts(pbftNode *PbftConsensusNode, rvc *message.R
 		}
 	}
 	return true
+}
+
+func validateSemanticWitnessDigest(rvc *message.ReshardingValidityCertificate, capsules []message.ShadowCapsule) bool {
+	if rvc == nil || rvc.SemanticWitnessDigest == "" {
+		return false
+	}
+	recomputed, err := semanticWitnessDigestForRVC(rvc, capsules)
+	if err != nil {
+		return false
+	}
+	return recomputed == rvc.SemanticWitnessDigest
 }
 
 func groupShadowCapsulesByRVCID(capsules []message.ShadowCapsule) map[string][]message.ShadowCapsule {

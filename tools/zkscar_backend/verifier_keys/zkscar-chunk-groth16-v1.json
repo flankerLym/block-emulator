@@ -1,0 +1,12 @@
+{
+  "kind": "chunk",
+  "protocol_version": "zkscar-chunk-v2",
+  "circuit_version": "chunk-membership-groth16-v1",
+  "proof_system": "groth16-bn128-strict",
+  "artifacts": {
+    "wasm": "artifacts/chunk_membership/chunk_membership_js/chunk_membership.wasm",
+    "zkey": "artifacts/chunk_membership/chunk_membership_final.zkey",
+    "vkey": "artifacts/chunk_membership/verification_key.json"
+  },
+  "depth": 16
+}

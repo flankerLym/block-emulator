@@ -1,6 +1,0 @@
-{
-  "verifier_key_id": "zkscar-vk-v3",
-  "protocol_version": "zkscar-rvc-v2",
-  "circuit_version": "state-proof-external-v1",
-  "proof_system": "external-witness-proof"
-}

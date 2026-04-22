@@ -43,6 +43,23 @@ type ShadowStateWitness struct {
 	ShadowProof *chain.AccountTrieProof
 }
 
+type RVCSemanticWitness struct {
+	Addr                  string
+	SourceBalance         string
+	SourceNonce           uint64
+	SourceCodeHashHex     string
+	SourceStorageRootHex  string
+	FreezeBalance         string
+	FreezeNonce           uint64
+	FreezeCodeHashHex     string
+	FreezeStorageRootHex  string
+	CapsuleBalance        string
+	CapsuleNonce          uint64
+	CapsuleCodeHashHex    string
+	CapsuleStorageRootHex string
+	DebtRootHex           string
+}
+
 type ReshardingValidityCertificate struct {
 	Algorithm       string
 	ProtocolVersion string
@@ -69,8 +86,12 @@ type ReshardingValidityCertificate struct {
 	BatchSize           uint64
 	WitnessBundleHash   string
 
+	SemanticWitnessDigest string
+
 	StateWitnesses  []*AccountStateWitness
 	ShadowWitnesses []*ShadowStateWitness
+
+	SemanticWitnesses []*RVCSemanticWitness `json:"-"`
 
 	ProofSystem   string
 	VerifierKeyID string

@@ -1,0 +1,9 @@
+{
+  "name": "zkscar-backend",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Strict Groth16 backend for ZK-SCAR",
+  "dependencies": {
+    "snarkjs": "^0.7.5"
+  }
+}

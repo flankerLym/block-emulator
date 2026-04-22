@@ -1,0 +1,12 @@
+{
+  "kind": "rvc",
+  "protocol_version": "zkscar-rvc-v3",
+  "circuit_version": "rvc-semantic-groth16-v1",
+  "proof_system": "groth16-bn128-strict",
+  "artifacts": {
+    "wasm": "artifacts/rvc_semantic_batch/rvc_semantic_batch_js/rvc_semantic_batch.wasm",
+    "zkey": "artifacts/rvc_semantic_batch/rvc_semantic_batch_final.zkey",
+    "vkey": "artifacts/rvc_semantic_batch/verification_key.json"
+  },
+  "max_batch": 32
+}

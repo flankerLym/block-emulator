@@ -3,9 +3,7 @@ package pbft_all
 import (
 	"blockEmulator/message"
 	"bytes"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -19,77 +17,27 @@ type ZKBackend interface {
 	BuildRVCProof(rvc *message.ReshardingValidityCertificate) (proofSystem string, verifierKeyID string, proofBytes []byte, proofDigest string, proofMode string)
 	VerifyRVCProof(rvc *message.ReshardingValidityCertificate) bool
 
-	BuildChunkProof(commitment, hash string, idx, total uint64) (proofSystem string, proof string)
-	VerifyChunkProof(proofSystem, commitment, hash, proof string, idx, total uint64) bool
+	BuildChunkProof(commitment, hash string, idx, total uint64, siblings []string) (proofSystem string, proof string)
+	VerifyChunkProof(proofSystem, verifierKeyID, commitment, hash, proof string, idx, total uint64) bool
 }
 
-type MockZKBackend struct{}
-
-func buildBackendDigest(parts []string) string {
-	h := sha256.Sum256([]byte(stringsJoin(parts)))
-	return hex.EncodeToString(h[:])
-}
-
-func (m *MockZKBackend) BuildRVCProof(rvc *message.ReshardingValidityCertificate) (string, string, []byte, string, string) {
-	proofBytes := []byte(buildBackendDigest(append([]string{"mock-proof"}, rvc.PublicInputs...)))
-	proofDigest := buildBackendDigest([]string{
-		"mock-groth16",
-		rvc.VerifierKeyID,
-		stringsJoin(rvc.PublicInputs),
-		rvc.WitnessBundleHash,
-		hex.EncodeToString(proofBytes),
-	})
-	return "mock-groth16", rvc.VerifierKeyID, proofBytes, proofDigest, "legacy-mock"
-}
-
-func (m *MockZKBackend) VerifyRVCProof(rvc *message.ReshardingValidityCertificate) bool {
-	if rvc == nil || rvc.ProofSystem == "" || rvc.VerifierKeyID == "" {
-		return false
-	}
-	expectedDigest := buildBackendDigest([]string{
-		rvc.ProofSystem,
-		rvc.VerifierKeyID,
-		stringsJoin(rvc.PublicInputs),
-		rvc.WitnessBundleHash,
-		hex.EncodeToString(rvc.ProofBytes),
-	})
-	return expectedDigest == rvc.ProofDigest
-}
-
-func (m *MockZKBackend) BuildChunkProof(commitment, hash string, idx, total uint64) (string, string) {
-	proof := buildBackendDigest([]string{
-		commitment,
-		hash,
-		strconv.FormatUint(idx, 10),
-		strconv.FormatUint(total, 10),
-	})
-	return "mock-merkle", proof
-}
-
-func (m *MockZKBackend) VerifyChunkProof(proofSystem, commitment, hash, proof string, idx, total uint64) bool {
-	if proofSystem != "mock-merkle" {
-		return false
-	}
-	expected := buildBackendDigest([]string{
-		commitment,
-		hash,
-		strconv.FormatUint(idx, 10),
-		strconv.FormatUint(total, 10),
-	})
-	return expected == proof
-}
-
-type backendDispatch struct {
-	mock *MockZKBackend
-}
+type backendDispatch struct{}
 
 type externalRVCProofRequest struct {
-	ProtocolVersion   string   `json:"protocol_version"`
-	CircuitVersion    string   `json:"circuit_version"`
-	VerifierKeyID     string   `json:"verifier_key_id"`
-	PublicInputs      []string `json:"public_inputs"`
-	WitnessBundleHash string   `json:"witness_bundle_hash"`
-	WitnessBundleB64  string   `json:"witness_bundle_b64,omitempty"`
+	ProtocolVersion       string   `json:"protocol_version"`
+	CircuitVersion        string   `json:"circuit_version"`
+	VerifierKeyID         string   `json:"verifier_key_id"`
+	CertificateID         string   `json:"certificate_id"`
+	EpochTag              uint64   `json:"epoch_tag"`
+	FromShard             uint64   `json:"from_shard"`
+	ToShard               uint64   `json:"to_shard"`
+	BatchSize             uint64   `json:"batch_size"`
+	WitnessBundleHash     string   `json:"witness_bundle_hash"`
+	WitnessBundleBinding  string   `json:"witness_bundle_binding"`
+	CertificateBinding    string   `json:"certificate_binding"`
+	SemanticWitnessDigest string   `json:"semantic_witness_digest"`
+	PublicInputs          []string `json:"public_inputs"`
+	WitnessBundleB64      string   `json:"witness_bundle_b64,omitempty"`
 
 	ProofSystem   string `json:"proof_system,omitempty"`
 	ProofDigest   string `json:"proof_digest,omitempty"`
@@ -98,12 +46,14 @@ type externalRVCProofRequest struct {
 }
 
 type externalChunkProofRequest struct {
-	ProtocolVersion string `json:"protocol_version"`
-	VerifierKeyID   string `json:"verifier_key_id"`
-	Commitment      string `json:"commitment"`
-	Hash            string `json:"hash"`
-	Index           uint64 `json:"index"`
-	Total           uint64 `json:"total"`
+	ProtocolVersion string   `json:"protocol_version"`
+	CircuitVersion  string   `json:"circuit_version"`
+	VerifierKeyID   string   `json:"verifier_key_id"`
+	Commitment      string   `json:"commitment"`
+	Hash            string   `json:"hash"`
+	Index           uint64   `json:"index"`
+	Total           uint64   `json:"total"`
+	Siblings        []string `json:"siblings,omitempty"`
 
 	ProofSystem string `json:"proof_system,omitempty"`
 	Proof       string `json:"proof,omitempty"`
@@ -121,19 +71,6 @@ type externalProofResponse struct {
 	Proof string `json:"proof,omitempty"`
 	Valid bool   `json:"valid,omitempty"`
 	Error string `json:"error,omitempty"`
-}
-
-func backendMode() string {
-	mode := strings.ToLower(strings.TrimSpace(os.Getenv("ZKSCAR_PROOF_BACKEND")))
-	if mode == "" {
-		return "external"
-	}
-	switch mode {
-	case "external", "legacy-mock":
-		return mode
-	default:
-		return "external"
-	}
 }
 
 func splitCommandLine(command string) []string {
@@ -178,6 +115,7 @@ func runExternalBackend(command string, payload any, out any) error {
 	cmd.Stdout = &stdout
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
+	cmd.Env = os.Environ()
 	if err := cmd.Run(); err != nil {
 		if stderr.Len() > 0 {
 			return fmt.Errorf("external backend failed: %s", strings.TrimSpace(stderr.String()))
@@ -194,63 +132,75 @@ func witnessBundleB64(rvc *message.ReshardingValidityCertificate) string {
 		CertificateID     string                         `json:"certificate_id"`
 		WitnessBundleHash string                         `json:"witness_bundle_hash"`
 		StateWitnesses    []*message.AccountStateWitness `json:"state_witnesses"`
+		SemanticWitnesses []*message.RVCSemanticWitness  `json:"semantic_witnesses"`
 	}{
 		ProtocolVersion:   rvc.ProtocolVersion,
 		CircuitVersion:    rvc.CircuitVersion,
 		CertificateID:     rvc.CertificateID,
 		WitnessBundleHash: rvc.WitnessBundleHash,
 		StateWitnesses:    rvc.StateWitnesses,
+		SemanticWitnesses: rvc.SemanticWitnesses,
 	})
 	return base64.StdEncoding.EncodeToString(raw)
 }
 
 func (b *backendDispatch) BuildRVCProof(rvc *message.ReshardingValidityCertificate) (string, string, []byte, string, string) {
-	if backendMode() == "legacy-mock" {
-		return b.mock.BuildRVCProof(rvc)
-	}
 	command := strings.TrimSpace(os.Getenv("ZKSCAR_EXTERNAL_RVC_PROVER"))
 	if command == "" {
 		command = defaultExternalCommand("rvc_prover")
 	}
 	resp := new(externalProofResponse)
 	req := &externalRVCProofRequest{
-		ProtocolVersion:   rvc.ProtocolVersion,
-		CircuitVersion:    rvc.CircuitVersion,
-		VerifierKeyID:     rvc.VerifierKeyID,
-		PublicInputs:      rvc.PublicInputs,
-		WitnessBundleHash: rvc.WitnessBundleHash,
-		WitnessBundleB64:  witnessBundleB64(rvc),
+		ProtocolVersion:       rvc.ProtocolVersion,
+		CircuitVersion:        rvc.CircuitVersion,
+		VerifierKeyID:         rvc.VerifierKeyID,
+		CertificateID:         rvc.CertificateID,
+		EpochTag:              rvc.EpochTag,
+		FromShard:             rvc.FromShard,
+		ToShard:               rvc.ToShard,
+		BatchSize:             rvc.BatchSize,
+		WitnessBundleHash:     rvc.WitnessBundleHash,
+		WitnessBundleBinding:  buildWitnessBundleBinding(rvc.WitnessBundleHash),
+		CertificateBinding:    buildCertificateBinding(rvc.CertificateID),
+		SemanticWitnessDigest: rvc.SemanticWitnessDigest,
+		PublicInputs:          rvc.PublicInputs,
+		WitnessBundleB64:      witnessBundleB64(rvc),
 	}
-	if err := runExternalBackend(command, req, resp); err == nil && resp.OK {
-		proofBytes, _ := base64.StdEncoding.DecodeString(resp.ProofBytesB64)
-		proofMode := resp.ProofMode
-		if proofMode == "" {
-			proofMode = "external-strict"
-		}
-		return resp.ProofSystem, resp.VerifierKeyID, proofBytes, resp.ProofDigest, proofMode
+	if err := runExternalBackend(command, req, resp); err != nil || !resp.OK {
+		return "", rvc.VerifierKeyID, nil, "", "external-error"
 	}
-	return "", rvc.VerifierKeyID, nil, "", "external-error"
+	proofBytes, _ := base64.StdEncoding.DecodeString(resp.ProofBytesB64)
+	proofMode := resp.ProofMode
+	if proofMode == "" {
+		proofMode = "external-groth16-strict-v1"
+	}
+	return resp.ProofSystem, resp.VerifierKeyID, proofBytes, resp.ProofDigest, proofMode
 }
 
 func (b *backendDispatch) VerifyRVCProof(rvc *message.ReshardingValidityCertificate) bool {
-	if backendMode() == "legacy-mock" {
-		return b.mock.VerifyRVCProof(rvc)
-	}
 	command := strings.TrimSpace(os.Getenv("ZKSCAR_EXTERNAL_RVC_VERIFIER"))
 	if command == "" {
 		command = defaultExternalCommand("rvc_verifier")
 	}
 	resp := new(externalProofResponse)
 	req := &externalRVCProofRequest{
-		ProtocolVersion:   rvc.ProtocolVersion,
-		CircuitVersion:    rvc.CircuitVersion,
-		VerifierKeyID:     rvc.VerifierKeyID,
-		PublicInputs:      rvc.PublicInputs,
-		WitnessBundleHash: rvc.WitnessBundleHash,
-		ProofSystem:       rvc.ProofSystem,
-		ProofDigest:       rvc.ProofDigest,
-		ProofMode:         rvc.ProofMode,
-		ProofBytesB64:     base64.StdEncoding.EncodeToString(rvc.ProofBytes),
+		ProtocolVersion:       rvc.ProtocolVersion,
+		CircuitVersion:        rvc.CircuitVersion,
+		VerifierKeyID:         rvc.VerifierKeyID,
+		CertificateID:         rvc.CertificateID,
+		EpochTag:              rvc.EpochTag,
+		FromShard:             rvc.FromShard,
+		ToShard:               rvc.ToShard,
+		BatchSize:             rvc.BatchSize,
+		WitnessBundleHash:     rvc.WitnessBundleHash,
+		WitnessBundleBinding:  buildWitnessBundleBinding(rvc.WitnessBundleHash),
+		CertificateBinding:    buildCertificateBinding(rvc.CertificateID),
+		SemanticWitnessDigest: rvc.SemanticWitnessDigest,
+		PublicInputs:          rvc.PublicInputs,
+		ProofSystem:           rvc.ProofSystem,
+		ProofDigest:           rvc.ProofDigest,
+		ProofMode:             rvc.ProofMode,
+		ProofBytesB64:         base64.StdEncoding.EncodeToString(rvc.ProofBytes),
 	}
 	if err := runExternalBackend(command, req, resp); err != nil || !resp.OK {
 		return false
@@ -258,22 +208,21 @@ func (b *backendDispatch) VerifyRVCProof(rvc *message.ReshardingValidityCertific
 	return resp.Valid
 }
 
-func (b *backendDispatch) BuildChunkProof(commitment, hash string, idx, total uint64) (string, string) {
-	if backendMode() == "legacy-mock" {
-		return b.mock.BuildChunkProof(commitment, hash, idx, total)
-	}
+func (b *backendDispatch) BuildChunkProof(commitment, hash string, idx, total uint64, siblings []string) (string, string) {
 	command := strings.TrimSpace(os.Getenv("ZKSCAR_EXTERNAL_CHUNK_PROVER"))
 	if command == "" {
 		command = defaultExternalCommand("chunk_prover")
 	}
 	resp := new(externalProofResponse)
 	req := &externalChunkProofRequest{
-		ProtocolVersion: "zkscar-chunk-v1",
-		VerifierKeyID:   "zkscar-chunk-v1",
+		ProtocolVersion: "zkscar-chunk-v2",
+		CircuitVersion:  "chunk-membership-groth16-v1",
+		VerifierKeyID:   "zkscar-chunk-groth16-v1",
 		Commitment:      commitment,
 		Hash:            hash,
 		Index:           idx,
 		Total:           total,
+		Siblings:        siblings,
 	}
 	if err := runExternalBackend(command, req, resp); err != nil || !resp.OK {
 		return "", ""
@@ -281,9 +230,9 @@ func (b *backendDispatch) BuildChunkProof(commitment, hash string, idx, total ui
 	return resp.ProofSystem, resp.Proof
 }
 
-func (b *backendDispatch) VerifyChunkProof(proofSystem, commitment, hash, proof string, idx, total uint64) bool {
-	if backendMode() == "legacy-mock" {
-		return b.mock.VerifyChunkProof(proofSystem, commitment, hash, proof, idx, total)
+func (b *backendDispatch) VerifyChunkProof(proofSystem, verifierKeyID, commitment, hash, proof string, idx, total uint64) bool {
+	if verifierKeyID == "" {
+		verifierKeyID = "zkscar-chunk-groth16-v1"
 	}
 	command := strings.TrimSpace(os.Getenv("ZKSCAR_EXTERNAL_CHUNK_VERIFIER"))
 	if command == "" {
@@ -291,8 +240,9 @@ func (b *backendDispatch) VerifyChunkProof(proofSystem, commitment, hash, proof 
 	}
 	resp := new(externalProofResponse)
 	req := &externalChunkProofRequest{
-		ProtocolVersion: "zkscar-chunk-v1",
-		VerifierKeyID:   "zkscar-chunk-v1",
+		ProtocolVersion: "zkscar-chunk-v2",
+		CircuitVersion:  "chunk-membership-groth16-v1",
+		VerifierKeyID:   verifierKeyID,
 		Commitment:      commitment,
 		Hash:            hash,
 		Index:           idx,
@@ -306,4 +256,16 @@ func (b *backendDispatch) VerifyChunkProof(proofSystem, commitment, hash, proof 
 	return resp.Valid
 }
 
-var zkBackend ZKBackend = &backendDispatch{mock: &MockZKBackend{}}
+var zkBackend ZKBackend = &backendDispatch{}
+
+func expectedStrictRVCPublicInputs(rvc *message.ReshardingValidityCertificate) []string {
+	return []string{
+		strconv.FormatUint(rvc.EpochTag, 10),
+		strconv.FormatUint(rvc.FromShard, 10),
+		strconv.FormatUint(rvc.ToShard, 10),
+		strconv.FormatUint(rvc.BatchSize, 10),
+		rvc.SemanticWitnessDigest,
+		buildWitnessBundleBinding(rvc.WitnessBundleHash),
+		buildCertificateBinding(rvc.CertificateID),
+	}
+}

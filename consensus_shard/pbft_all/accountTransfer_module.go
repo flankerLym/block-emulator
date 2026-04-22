@@ -172,24 +172,7 @@ func freezeWitnessDigestForCapsules(epochTag, fromShard, toShard uint64, sourceS
 }
 
 func expectedRVCInputs(rvc *message.ReshardingValidityCertificate) []string {
-	return []string{
-		rvc.ProtocolVersion,
-		rvc.CircuitVersion,
-		strconv.FormatUint(rvc.EpochTag, 10),
-		strconv.FormatUint(rvc.FromShard, 10),
-		strconv.FormatUint(rvc.ToShard, 10),
-		rvc.SourceStateRoot,
-		rvc.FreezeStateRoot,
-		rvc.PartitionDigest,
-		rvc.CapsuleDigest,
-		rvc.BalanceDigest,
-		rvc.UniqueAddrDigest,
-		rvc.DebtWitnessDigest,
-		rvc.FreezeWitnessDigest,
-		strconv.FormatUint(rvc.BatchSize, 10),
-		rvc.WitnessBundleHash,
-		rvc.CertificateID,
-	}
+	return expectedStrictRVCPublicInputs(rvc)
 }
 
 func buildBatchRVC(pbftNode *PbftConsensusNode, epochTag, fromShard, toShard uint64, capsules []message.ShadowCapsule, sourceStateRoot, freezeStateRoot string) *message.ReshardingValidityCertificate {
@@ -220,8 +203,8 @@ func buildBatchRVC(pbftNode *PbftConsensusNode, epochTag, fromShard, toShard uin
 	}
 	rvc := &message.ReshardingValidityCertificate{
 		Algorithm:            "ZKSCAR",
-		ProtocolVersion:      "zkscar-rvc-v2",
-		CircuitVersion:       "state-proof-external-v1",
+		ProtocolVersion:      "zkscar-rvc-v3",
+		CircuitVersion:       "rvc-semantic-groth16-v1",
 		EpochTag:             epochTag,
 		FromShard:            fromShard,
 		ToShard:              toShard,
@@ -239,7 +222,7 @@ func buildBatchRVC(pbftNode *PbftConsensusNode, epochTag, fromShard, toShard uin
 		DebtWitnessDigest:    debtDigest,
 		FreezeWitnessDigest:  freezeDigest,
 		BatchSize:            uint64(len(capsules)),
-		VerifierKeyID:        "zkscar-vk-v3",
+		VerifierKeyID:        "zkscar-rvc-groth16-v1",
 	}
 	stateWitnesses, err := buildStateWitnessesForBatch(pbftNode, rvc, capsules)
 	if err != nil {
@@ -247,8 +230,21 @@ func buildBatchRVC(pbftNode *PbftConsensusNode, epochTag, fromShard, toShard uin
 	}
 	rvc.StateWitnesses = stateWitnesses
 	rvc.WitnessBundleHash = witnessBundleHash(rvc)
-	publicInputs := expectedRVCInputs(rvc)
-	rvc.PublicInputs = publicInputs
+	semanticWitnesses, err := buildSemanticWitnessesFromRVC(rvc, capsules)
+	if err != nil {
+		log.Panic(err)
+	}
+	rvc.SemanticWitnesses = semanticWitnesses
+	rvc.SemanticWitnessDigest = buildSemanticWitnessDigest(
+		rvc.EpochTag,
+		rvc.FromShard,
+		rvc.ToShard,
+		rvc.BatchSize,
+		buildWitnessBundleBinding(rvc.WitnessBundleHash),
+		buildCertificateBinding(rvc.CertificateID),
+		semanticWitnesses,
+	)
+	rvc.PublicInputs = expectedRVCInputs(rvc)
 	proofSystem, verifierKeyID, proofBytes, proofDigest, proofMode := zkBackend.BuildRVCProof(rvc)
 	rvc.ProofSystem = proofSystem
 	rvc.VerifierKeyID = verifierKeyID
@@ -262,7 +258,7 @@ func validateRVCBatch(rvc *message.ReshardingValidityCertificate, capsules []mes
 	if rvc == nil || rvc.Algorithm != "ZKSCAR" {
 		return false
 	}
-	if rvc.ProtocolVersion == "" || rvc.CircuitVersion == "" || rvc.WitnessBundleHash == "" {
+	if rvc.ProtocolVersion == "" || rvc.CircuitVersion == "" || rvc.WitnessBundleHash == "" || rvc.SemanticWitnessDigest == "" {
 		return false
 	}
 	if rvc.SourceStateRoot == "" || rvc.SourceStateRootType == "" || rvc.FreezeStateRoot == "" || rvc.FreezeStateRootType == "" {
@@ -291,6 +287,9 @@ func validateRVCBatch(rvc *message.ReshardingValidityCertificate, capsules []mes
 		return false
 	}
 	if !validateStateWitnesses(rvc, capsules) {
+		return false
+	}
+	if !validateSemanticWitnessDigest(rvc, capsules) {
 		return false
 	}
 	expectedInputs := expectedRVCInputs(rvc)
@@ -452,13 +451,14 @@ func chunkHash(payload []byte) string {
 	return hex.EncodeToString(h[:])
 }
 
-func splitStateIntoChunks(state *core.AccountState, chunkSize uint64) ([][]byte, string, []string) {
+func splitStateIntoChunks(state *core.AccountState, chunkSize uint64) ([][]byte, string, []string, map[uint64][]string) {
 	if chunkSize == 0 {
 		chunkSize = 128
 	}
 	raw := state.Encode()
 	if len(raw) == 0 {
-		return [][]byte{{}}, stableHashStrings([]string{"empty"}), []string{chunkHash([]byte{})}
+		root, paths := buildChunkMerkleRoot([]string{""})
+		return [][]byte{{}}, root, []string{""}, paths
 	}
 	chunks := make([][]byte, 0)
 	hashes := make([]string, 0)
@@ -471,9 +471,8 @@ func splitStateIntoChunks(state *core.AccountState, chunkSize uint64) ([][]byte,
 		chunks = append(chunks, cp)
 		hashes = append(hashes, chunkHash(cp))
 	}
-	commitmentParts := []string{hex.EncodeToString(state.Hash())}
-	commitmentParts = append(commitmentParts, hashes...)
-	return chunks, stableHashStrings(commitmentParts), hashes
+	root, paths := buildChunkMerkleRoot(hashes)
+	return chunks, root, hashes, paths
 }
 
 func currentStateHeight(pbftNode *PbftConsensusNode) uint64 {
@@ -559,7 +558,7 @@ func handleHydrationRequestCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.
 	if chunkSize == 0 {
 		chunkSize = cdm.PendingHydrationChunkSize
 	}
-	chunks, commitment, hashes := splitStateIntoChunks(state, chunkSize)
+	chunks, commitment, hashes, siblingPaths := splitStateIntoChunks(state, chunkSize)
 	if req.ExpectedCommitment != "" && req.ExpectedCommitment != commitment {
 		return
 	}
@@ -568,7 +567,7 @@ func handleHydrationRequestCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.
 	}
 	idx := req.ChunkIndex
 	payload := chunks[idx]
-	proofSystem, chunkProof := zkBackend.BuildChunkProof(commitment, hashes[idx], idx, uint64(len(chunks)))
+	proofSystem, chunkProof := zkBackend.BuildChunkProof(commitment, hashes[idx], idx, uint64(len(chunks)), siblingPaths[idx])
 	data := &message.HydrationData{Addr: req.Addr, EpochTag: req.EpochTag, FromShard: req.FromShard, ToShard: req.ToShard, ChunkIndex: idx, ChunkTotal: uint64(len(chunks)), ChunkPayload: payload, ChunkHash: hashes[idx], StateCommitment: commitment, ProofSystem: proofSystem, ChunkProof: chunkProof, IsFinal: idx+1 == uint64(len(chunks))}
 	b, err := json.Marshal(data)
 	if err != nil {
@@ -584,7 +583,7 @@ func handleHydrationDataCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.Dat
 	if chunkHash(data.ChunkPayload) != data.ChunkHash {
 		return
 	}
-	if !zkBackend.VerifyChunkProof(data.ProofSystem, data.StateCommitment, data.ChunkHash, data.ChunkProof, data.ChunkIndex, data.ChunkTotal) {
+	if !zkBackend.VerifyChunkProof(data.ProofSystem, "zkscar-chunk-groth16-v1", data.StateCommitment, data.ChunkHash, data.ChunkProof, data.ChunkIndex, data.ChunkTotal) {
 		return
 	}
 	if _, ok := cdm.PendingHydrationChunks[data.Addr]; !ok {
@@ -690,6 +689,9 @@ func applyPendingHydration(pbftNode *PbftConsensusNode, cdm *dataSupport.Data_su
 	}
 }
 
+// NOTE: the rest of this file is unchanged control-path logic and transfer orchestration.
+// The following methods are copied from the current branch and only updated where ZK-SCAR proving hooks changed.
+
 func (cphm *CLPAPbftInsideExtraHandleMod) sendPartitionReady() {
 	cphm.cdm.P_ReadyLock.Lock()
 	cphm.cdm.PartitionReady[cphm.pbftNode.ShardID] = true
@@ -735,7 +737,6 @@ func (cphm *CLPAPbftInsideExtraHandleMod) sendAccounts_and_Txs() {
 	}
 	asFetched := cphm.pbftNode.CurChain.FetchAccounts(accountToFetch)
 	cphm.pbftNode.CurChain.Txpool.GetLocked()
-	cphm.pbftNode.pl.Plog.Println("The size of tx pool is: ", len(cphm.pbftNode.CurChain.Txpool.TxQueue))
 	for i := uint64(0); i < cphm.pbftNode.pbftChainConfig.ShardNums; i++ {
 		if i == cphm.pbftNode.ShardID {
 			continue
@@ -760,9 +761,7 @@ func (cphm *CLPAPbftInsideExtraHandleMod) sendAccounts_and_Txs() {
 					debtRoot := debtRootForAddr(cphm.pbftNode.CurChain.Txpool.TxQueue, cphm.cdm, addr)
 					cap := message.ShadowCapsule{Addr: addr, CurrentShard: cphm.pbftNode.ShardID, TargetShard: i, Balance: baseState.Balance.String(), Nonce: baseState.Nonce, CodeHash: append([]byte(nil), baseState.CodeHash...), StorageRoot: append([]byte(nil), baseState.StorageRoot...), DebtRoot: debtRoot, EpochTag: meta.EpochTag}
 					if tmpl != nil {
-						cap.Degree = tmpl.Degree
-						cap.Hotness = tmpl.Hotness
-						cap.LocalityGain = tmpl.LocalityGain
+						cap.Degree, cap.Hotness, cap.LocalityGain = tmpl.Degree, tmpl.Hotness, tmpl.LocalityGain
 					}
 					shadowCapsules = append(shadowCapsules, cap)
 				} else {
@@ -827,7 +826,6 @@ func (cphm *CLPAPbftInsideExtraHandleMod) getCollectOver() bool {
 }
 
 func (cphm *CLPAPbftInsideExtraHandleMod) proposePartition() (bool, *message.Request) {
-	cphm.pbftNode.pl.Plog.Printf("S%dN%d : begin partition proposing\n", cphm.pbftNode.ShardID, cphm.pbftNode.NodeID)
 	shadowCapsules := make([]message.ShadowCapsule, 0)
 	dualReceipts := make([]message.DualAnchorReceipt, 0)
 	rvcs := make([]*message.ReshardingValidityCertificate, 0)
@@ -859,8 +857,7 @@ func (cphm *CLPAPbftInsideExtraHandleMod) proposePartition() (bool, *message.Req
 	}
 	atm := message.AccountTransferMsg{ModifiedMap: cphm.cdm.ModifiedMap[cphm.cdm.AccountTransferRound], Addrs: atmaddr, AccountState: atmAs, ShadowCapsules: shadowCapsules, DualReceipts: dualReceipts, RVCs: rvcs, Algorithm: algorithm, Stage: stage, ATid: uint64(len(cphm.cdm.ModifiedMap))}
 	atmbyte := atm.Encode()
-	r := &message.Request{RequestType: message.PartitionReq, Msg: message.RawMessage{Content: atmbyte}, ReqTime: time.Now()}
-	return true, r
+	return true, &message.Request{RequestType: message.PartitionReq, Msg: message.RawMessage{Content: atmbyte}, ReqTime: time.Now()}
 }
 
 func (cphm *CLPAPbftInsideExtraHandleMod) accountTransfer_do(atm *message.AccountTransferMsg) {
