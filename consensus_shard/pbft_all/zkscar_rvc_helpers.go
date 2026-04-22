@@ -3,7 +3,6 @@ package pbft_all
 import (
 	"blockEmulator/chain"
 	"blockEmulator/consensus_shard/pbft_all/dataSupport"
-	"blockEmulator/core"
 	"blockEmulator/message"
 	"crypto/sha256"
 	"encoding/hex"
@@ -87,10 +86,10 @@ func witnessBundleHash(rvc *message.ReshardingValidityCertificate) string {
 		}
 		lines = append(lines,
 			w.Addr+"|"+
-				w.SourceProof.StateRoot+"|"+
-				w.SourceProof.AccountHash+"|"+
-				w.FreezeProof.StateRoot+"|"+
-				w.FreezeProof.AccountHash)
+				w.SourceProof.Root+"|"+
+				w.SourceProof.ValueHex+"|"+
+				w.FreezeProof.Root+"|"+
+				w.FreezeProof.ValueHex)
 	}
 	sort.Strings(lines)
 	return hashStrings(lines)
@@ -260,7 +259,10 @@ func validateInstalledShadowAccounts(pbftNode *PbftConsensusNode, rvc *message.R
 		if !ok {
 			return false
 		}
-		if w.ShadowProof.StateRoot != rootHex || !w.ShadowProof.Exists {
+		if w.ShadowProof.Root != rootHex {
+			return false
+		}
+		if _, err := chain.VerifyAccountProof(w.ShadowProof); err != nil {
 			return false
 		}
 		as := pbftNode.CurChain.GetAccountState(cap.Addr)
