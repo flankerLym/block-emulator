@@ -48,10 +48,11 @@ type Data_supportCLPA struct {
 	AddressReceiptIndex map[string]map[string]bool
 	// receiptKey -> settled
 	SettledDualAnchorReceipts map[string]bool
+	// address -> post-cutover write key -> true
+	PostCutoverWriteSet map[string]map[string]bool
 
-	SourceCustodyState    map[string]*core.AccountState
-	RetiredAccounts       map[string]bool
-	PostCutoverWriteIndex map[string]map[string]bool
+	SourceCustodyState map[string]*core.AccountState
+	RetiredAccounts    map[string]bool
 }
 
 func NewCLPADataSupport() *Data_supportCLPA {
@@ -81,8 +82,8 @@ func NewCLPADataSupport() *Data_supportCLPA {
 		RetirementProofPool:         make(map[string]*message.RetirementProof),
 		AddressReceiptIndex:         make(map[string]map[string]bool),
 		SettledDualAnchorReceipts:   make(map[string]bool),
+		PostCutoverWriteSet:         make(map[string]map[string]bool),
 		SourceCustodyState:          make(map[string]*core.AccountState),
 		RetiredAccounts:             make(map[string]bool),
-		PostCutoverWriteIndex:       make(map[string]map[string]bool),
 	}
 }

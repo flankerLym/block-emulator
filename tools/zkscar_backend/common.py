@@ -11,10 +11,12 @@ BN254_MOD = 21888242871839275222246405745257275088548364400416034343698204186575
 MIMC_ROUNDS = 91
 MAX_RVC_BATCH = 32
 CHUNK_TREE_DEPTH = 16
-RETIREMENT_MAX_RECEIPTS = 64
-RETIREMENT_MAX_WRITES = 32
+MAX_RETIREMENT_RECEIPTS = 64
+MAX_POST_CUTOVER_WRITES = 32
 
 ROOT = Path(__file__).resolve().parent
+ARTIFACTS_ROOT = ROOT / "artifacts"
+CIRCUITS_ROOT = ROOT / "circuits"
 VK_DIR = ROOT / "verifier_keys"
 
 
@@ -69,8 +71,12 @@ def field_str(v: int) -> str:
     return str(modp(v))
 
 
+def rvc_meta_path(vk_id: str) -> Path:
+    return VK_DIR / f"{vk_id}.json"
+
+
 def load_vk(vk_id: str) -> Dict:
-    path = VK_DIR / f"{vk_id}.json"
+    path = rvc_meta_path(vk_id)
     if not path.exists():
         raise FileNotFoundError(f"unknown verifier key: {vk_id}")
     return json.loads(path.read_text(encoding="utf-8"))
@@ -216,183 +222,118 @@ def leaf_hash_field(hash_hex: str) -> int:
     return hash_hex_to_field(hash_hex)
 
 
-def retirement_receipt_entries(req: Dict) -> List[Dict]:
-    entries = []
-    for item in req.get("receipt_witnesses", []) or []:
-        entries.append({
-            "key": str(item["key"]),
-            "settled": bool(item["settled"]),
-        })
-    entries.sort(key=lambda x: x["key"])
-    if len(entries) > RETIREMENT_MAX_RECEIPTS:
-        raise RuntimeError(f"retirement receipt witnesses exceed RETIREMENT_MAX_RECEIPTS={RETIREMENT_MAX_RECEIPTS}")
-    return entries
+def retirement_debt_digest(settled_keys: List[str], outstanding_keys: List[str]) -> str:
+    vals: List[int] = []
+    for key in sorted(set(settled_keys or [])):
+        vals.extend([hash_text_to_field(key), 1])
+    for key in sorted(set(outstanding_keys or [])):
+        vals.extend([hash_text_to_field(key), 0])
+    return field_str(mimc_chain(vals))
 
 
-def retirement_write_keys(req: Dict) -> List[str]:
-    keys = sorted([str(x) for x in (req.get("write_keys", []) or [])])
-    if len(keys) > RETIREMENT_MAX_WRITES:
-        raise RuntimeError(f"retirement write witnesses exceed RETIREMENT_MAX_WRITES={RETIREMENT_MAX_WRITES}")
-    return keys
+def no_write_digest(write_keys: List[str]) -> str:
+    entries = [f"write|{k}" for k in sorted(set(write_keys or []))]
+    return field_str(mimc_chain([hash_text_to_field(x) for x in entries]))
 
 
-def retirement_debt_digest(epoch_tag: int, from_shard: int, to_shard: int, account_binding: str, rvc_binding: str, receipts: List[Dict]) -> str:
-    vals = [
+def retirement_digest(address_binding: str, epoch_tag: int, from_shard: int, to_shard: int, settled_count: int, outstanding_count: int, write_count: int, debt_digest: str, no_write_digest_text: str, rvc_binding: str) -> str:
+    return field_str(mimc_chain([
+        decimal_text_to_field(address_binding),
         int(epoch_tag),
         int(from_shard),
         int(to_shard),
-        int(account_binding),
-        int(rvc_binding),
-    ]
-    for i in range(RETIREMENT_MAX_RECEIPTS):
-        if i < len(receipts):
-            vals.extend([
-                1,
-                hash_text_to_field(receipts[i]["key"]),
-                1 if receipts[i]["settled"] else 0,
-            ])
-        else:
-            vals.extend([0, 0, 0])
-    return field_str(mimc_chain(vals))
-
-
-def retirement_no_write_digest(epoch_tag: int, from_shard: int, to_shard: int, account_binding: str, rvc_binding: str, write_keys: List[str]) -> str:
-    vals = [
-        int(epoch_tag),
-        int(from_shard),
-        int(to_shard),
-        int(account_binding),
-        int(rvc_binding),
-    ]
-    for i in range(RETIREMENT_MAX_WRITES):
-        if i < len(write_keys):
-            vals.extend([1, hash_text_to_field(write_keys[i])])
-        else:
-            vals.extend([0, 0])
-    return field_str(mimc_chain(vals))
-
-
-def retirement_witness_digest(req: Dict) -> str:
-    hydrated = 1 if req.get("hydrated_flag") else 0
-    debt_cleared = 1 if req.get("debt_root_cleared_flag") else 0
-    vals = [
-        int(req["epoch_tag"]),
-        int(req["from_shard"]),
-        int(req["to_shard"]),
-        hydrated,
-        debt_cleared,
-        int(req["settled_receipt_count"]),
-        int(req["outstanding_receipt_count"]),
-        int(req["post_cutover_write_count"]),
-        int(req["debt_witness_digest"]),
-        int(req["no_write_witness_digest"]),
-        int(req["account_binding"]),
-        int(req["rvc_binding"]),
-    ]
-    return field_str(mimc_chain(vals))
+        int(settled_count),
+        int(outstanding_count),
+        int(write_count),
+        decimal_text_to_field(debt_digest),
+        decimal_text_to_field(no_write_digest_text),
+        decimal_text_to_field(rvc_binding),
+    ]))
 
 
 def build_retirement_public_inputs_from_request(req: Dict) -> List[str]:
-    hydrated = "1" if req.get("hydrated_flag") else "0"
-    debt_cleared = "1" if req.get("debt_root_cleared_flag") else "0"
     return [
+        str(req["address_binding"]),
         str(req["epoch_tag"]),
         str(req["from_shard"]),
         str(req["to_shard"]),
-        hydrated,
-        debt_cleared,
+        str(req["hydrated_flag"]),
+        str(req["debt_root_cleared_flag"]),
         str(req["settled_receipt_count"]),
         str(req["outstanding_receipt_count"]),
         str(req["post_cutover_write_count"]),
         str(req["debt_witness_digest"]),
         str(req["no_write_witness_digest"]),
         str(req["retirement_witness_digest"]),
-        str(req["account_binding"]),
         str(req["rvc_binding"]),
     ]
 
 
 def build_retirement_circuit_input(req: Dict) -> Dict:
-    receipts = retirement_receipt_entries(req)
-    write_keys = retirement_write_keys(req)
+    bundle = json.loads(base64.b64decode(req["witness_bundle_b64"]).decode("utf-8"))
+    settled_keys = sorted(set(bundle.get("settled_receipt_keys") or []))
+    outstanding_keys = sorted(set(bundle.get("outstanding_receipt_keys") or []))
+    write_keys = sorted(set(bundle.get("post_cutover_write_keys") or []))
 
-    settled_count = sum(1 for x in receipts if x["settled"])
-    outstanding_count = sum(1 for x in receipts if not x["settled"])
-    if settled_count != int(req["settled_receipt_count"]):
-        raise RuntimeError("settled receipt count mismatch before proving")
-    if outstanding_count != int(req["outstanding_receipt_count"]):
-        raise RuntimeError("outstanding receipt count mismatch before proving")
-    if len(write_keys) != int(req["post_cutover_write_count"]):
-        raise RuntimeError("post-cutover write count mismatch before proving")
+    if len(settled_keys) + len(outstanding_keys) > MAX_RETIREMENT_RECEIPTS:
+        raise RuntimeError(f"retirement receipt witness exceeds MAX_RETIREMENT_RECEIPTS={MAX_RETIREMENT_RECEIPTS}")
+    if len(write_keys) > MAX_POST_CUTOVER_WRITES:
+        raise RuntimeError(f"post-cutover write witness exceeds MAX_POST_CUTOVER_WRITES={MAX_POST_CUTOVER_WRITES}")
 
-    expected_debt = retirement_debt_digest(
-        int(req["epoch_tag"]),
-        int(req["from_shard"]),
-        int(req["to_shard"]),
-        str(req["account_binding"]),
-        str(req["rvc_binding"]),
-        receipts,
-    )
+    expected_debt = retirement_debt_digest(settled_keys, outstanding_keys)
     if expected_debt != str(req["debt_witness_digest"]):
         raise RuntimeError("retirement debt witness digest mismatch before proving")
 
-    expected_no_write = retirement_no_write_digest(
-        int(req["epoch_tag"]),
-        int(req["from_shard"]),
-        int(req["to_shard"]),
-        str(req["account_binding"]),
-        str(req["rvc_binding"]),
-        write_keys,
-    )
+    expected_no_write = no_write_digest(write_keys)
     if expected_no_write != str(req["no_write_witness_digest"]):
         raise RuntimeError("retirement no-write digest mismatch before proving")
 
-    expected_retirement_digest = retirement_witness_digest(req)
-    if expected_retirement_digest != str(req["retirement_witness_digest"]):
+    expected_retirement = retirement_digest(
+        str(req["address_binding"]),
+        int(req["epoch_tag"]),
+        int(req["from_shard"]),
+        int(req["to_shard"]),
+        int(req["settled_receipt_count"]),
+        int(req["outstanding_receipt_count"]),
+        int(req["post_cutover_write_count"]),
+        str(req["debt_witness_digest"]),
+        str(req["no_write_witness_digest"]),
+        str(req["rvc_binding"]),
+    )
+    if expected_retirement != str(req["retirement_witness_digest"]):
         raise RuntimeError("retirement witness digest mismatch before proving")
 
-    expected_public = build_retirement_public_inputs_from_request(req)
-    if [str(x) for x in req.get("public_inputs", [])] != expected_public:
-        raise RuntimeError("retirement public inputs mismatch before proving")
+    receipt_active = [1] * (len(settled_keys) + len(outstanding_keys))
+    receipt_settled = [1] * len(settled_keys) + [0] * len(outstanding_keys)
+    receipt_keys = [field_str(hash_text_to_field(k)) for k in settled_keys + outstanding_keys]
+    while len(receipt_active) < MAX_RETIREMENT_RECEIPTS:
+        receipt_active.append(0)
+        receipt_settled.append(0)
+        receipt_keys.append("0")
 
-    receipt_active = []
-    receipt_key = []
-    receipt_settled = []
-    for item in receipts:
-        receipt_active.append("1")
-        receipt_key.append(field_str(hash_text_to_field(item["key"])))
-        receipt_settled.append("1" if item["settled"] else "0")
-    while len(receipt_active) < RETIREMENT_MAX_RECEIPTS:
-        receipt_active.append("0")
-        receipt_key.append("0")
-        receipt_settled.append("0")
-
-    write_active = []
-    write_key = []
-    for item in write_keys:
-        write_active.append("1")
-        write_key.append(field_str(hash_text_to_field(item)))
-    while len(write_active) < RETIREMENT_MAX_WRITES:
-        write_active.append("0")
-        write_key.append("0")
+    write_active = [1] * len(write_keys)
+    write_keys_field = [field_str(hash_text_to_field(f"write|{k}")) for k in write_keys]
+    while len(write_active) < MAX_POST_CUTOVER_WRITES:
+        write_active.append(0)
+        write_keys_field.append("0")
 
     return {
+        "addressBinding": str(req["address_binding"]),
         "epochTag": str(req["epoch_tag"]),
         "fromShard": str(req["from_shard"]),
         "toShard": str(req["to_shard"]),
-        "hydratedFlag": "1" if req.get("hydrated_flag") else "0",
-        "debtRootClearedFlag": "1" if req.get("debt_root_cleared_flag") else "0",
+        "hydratedFlag": str(req["hydrated_flag"]),
+        "debtRootClearedFlag": str(req["debt_root_cleared_flag"]),
         "settledReceiptCount": str(req["settled_receipt_count"]),
         "outstandingReceiptCount": str(req["outstanding_receipt_count"]),
         "postCutoverWriteCount": str(req["post_cutover_write_count"]),
         "debtWitnessDigest": str(req["debt_witness_digest"]),
         "noWriteWitnessDigest": str(req["no_write_witness_digest"]),
         "retirementWitnessDigest": str(req["retirement_witness_digest"]),
-        "accountBinding": str(req["account_binding"]),
         "rvcBinding": str(req["rvc_binding"]),
-        "receiptActive": receipt_active,
-        "receiptKey": receipt_key,
-        "receiptSettled": receipt_settled,
-        "writeActive": write_active,
-        "writeKey": write_key,
+        "receiptActive": [str(x) for x in receipt_active],
+        "receiptKey": receipt_keys,
+        "receiptSettled": [str(x) for x in receipt_settled],
+        "writeActive": [str(x) for x in write_active],
+        "writeKey": write_keys_field,
     }

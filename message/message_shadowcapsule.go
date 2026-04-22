@@ -45,24 +45,25 @@ type RetirementProof struct {
 	ToShard         uint64
 	Hydrated        bool
 	DebtRootCleared bool
-	RVCID           string
 
-	ProtocolVersion string
-	CircuitVersion  string
-	VerifierKeyID   string
-
-	AccountBinding          string
-	RVCBinding              string
 	SettledReceiptCount     uint64
 	OutstandingReceiptCount uint64
 	PostCutoverWriteCount   uint64
+
+	AddressBinding          string
+	RVCBinding              string
 	DebtWitnessDigest       string
 	NoWriteWitnessDigest    string
 	RetirementWitnessDigest string
 
-	PublicInputs []string
-	ProofSystem  string
-	ProofBytes   []byte
-	ProofDigest  string
-	ProofMode    string
+	RVCID string
+
+	ProtocolVersion string
+	CircuitVersion  string
+	VerifierKeyID   string
+	PublicInputs    []string
+	ProofSystem     string
+	ProofBytes      []byte
+	ProofDigest     string
+	ProofMode       string
 }

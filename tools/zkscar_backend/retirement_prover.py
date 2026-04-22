@@ -1,17 +1,13 @@
 #!/usr/bin/env python3
 import base64
+import hashlib
 import json
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-from common import (
-    build_retirement_circuit_input,
-    build_retirement_public_inputs_from_request,
-    ensure_retirement_artifacts,
-    load_vk,
-)
+from common import build_retirement_circuit_input, build_retirement_public_inputs_from_request, ensure_retirement_artifacts, load_vk
 
 
 def main():
@@ -51,7 +47,6 @@ def main():
             "public": [str(x) for x in public_vals],
         }
         proof_bytes = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        import hashlib
         proof_digest = hashlib.sha256(proof_bytes).hexdigest()
         json.dump({
             "ok": True,

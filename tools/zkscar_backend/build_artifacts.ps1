@@ -28,7 +28,6 @@ snarkjs zkey export verificationkey (Join-Path $Art 'chunk_membership/chunk_memb
 
 circom (Join-Path $Cir 'retirement_finality.circom') --r1cs --wasm --sym -o (Join-Path $Art 'retirement_finality')
 snarkjs groth16 setup (Join-Path $Art 'retirement_finality/retirement_finality.r1cs') $Ptau (Join-Path $Art 'retirement_finality/retirement_finality_0000.zkey')
-snarkjs zkey contribute (Join-Path $Art 'retirement_finality/retirement_finality_0000.zkey') (Join-Path $Art 'retirement_finality/retirement_finality_final.zkey') --name='ZKSCAR-RETIREMENT' -v -e='retirement'
+snarkjs zkey contribute (Join-Path $Art 'retirement_finality/retirement_finality_0000.zkey') (Join-Path $Art 'retirement_finality/retirement_finality_final.zkey') --name='ZKSCAR-RETIRE' -v -e='retire'
 snarkjs zkey export verificationkey (Join-Path $Art 'retirement_finality/retirement_finality_final.zkey') (Join-Path $Art 'retirement_finality/verification_key.json')
-
 Write-Host "Artifacts built under $Art"

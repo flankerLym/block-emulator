@@ -1,10 +1,10 @@
 package build
 
 import (
+	"blockEmulator/consensus_shard/pbft_all"
 	"blockEmulator/networks"
 	"blockEmulator/params"
 	"blockEmulator/supervisor"
-	"blockEmulator/tools/zkscar_backend/consensus_shard/pbft_all"
 	"log"
 	"time"
 )

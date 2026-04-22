@@ -7,11 +7,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from common import (
-    build_retirement_public_inputs_from_request,
-    ensure_retirement_artifacts,
-    load_vk,
-)
+from common import build_retirement_public_inputs_from_request, ensure_retirement_artifacts, load_vk
 
 
 def main():

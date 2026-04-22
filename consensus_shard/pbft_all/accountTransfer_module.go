@@ -1,11 +1,11 @@
 package pbft_all
 
 import (
+	"blockEmulator/consensus_shard/pbft_all/dataSupport"
 	"blockEmulator/core"
 	"blockEmulator/message"
 	"blockEmulator/networks"
 	"blockEmulator/params"
-	"blockEmulator/tools/zkscar_backend/consensus_shard/pbft_all/dataSupport"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -399,6 +399,64 @@ func markDualAnchorReceiptsSettledForBlock(cdm *dataSupport.Data_supportCLPA, tx
 	}
 }
 
+func txTouchesAddress(tx *core.Transaction, addr string) bool {
+	if tx == nil || addr == "" {
+		return false
+	}
+	return string(tx.Sender) == addr || string(tx.Recipient) == addr || string(tx.OriginalSender) == addr || string(tx.FinalRecipient) == addr
+}
+
+func txWriteKey(tx *core.Transaction) string {
+	if tx == nil {
+		return ""
+	}
+	hashHex := hex.EncodeToString(tx.TxHash)
+	if hashHex == "" {
+		hashHex = hex.EncodeToString(tx.RawTxHash)
+	}
+	if hashHex == "" {
+		hashHex = stableHashStrings([]string{string(tx.Sender), string(tx.Recipient), string(tx.OriginalSender), string(tx.FinalRecipient)})
+	}
+	return stringsJoin([]string{"tx", hashHex, string(tx.Sender), string(tx.Recipient), string(tx.OriginalSender), string(tx.FinalRecipient)})
+}
+
+func indexPostCutoverWrite(cdm *dataSupport.Data_supportCLPA, addr, key string) {
+	if cdm == nil || addr == "" || key == "" {
+		return
+	}
+	if _, ok := cdm.PostCutoverWriteSet[addr]; !ok {
+		cdm.PostCutoverWriteSet[addr] = make(map[string]bool)
+	}
+	cdm.PostCutoverWriteSet[addr][key] = true
+}
+
+func recordPostCutoverWritesForBlock(cdm *dataSupport.Data_supportCLPA, txs []*core.Transaction) {
+	if cdm == nil || len(txs) == 0 {
+		return
+	}
+	monitored := make(map[string]bool)
+	for addr := range cdm.SourceCustodyState {
+		monitored[addr] = true
+	}
+	for addr := range cdm.RetiredAccounts {
+		monitored[addr] = true
+	}
+	if len(monitored) == 0 {
+		return
+	}
+	for _, tx := range txs {
+		if tx == nil {
+			continue
+		}
+		key := txWriteKey(tx)
+		for addr := range monitored {
+			if txTouchesAddress(tx, addr) {
+				indexPostCutoverWrite(cdm, addr, key)
+			}
+		}
+	}
+}
+
 func computeDebtRootCleared(cdm *dataSupport.Data_supportCLPA, addr string) bool {
 	keys, ok := cdm.AddressReceiptIndex[addr]
 	if !ok || len(keys) == 0 {
@@ -412,8 +470,19 @@ func computeDebtRootCleared(cdm *dataSupport.Data_supportCLPA, addr string) bool
 	return true
 }
 
+func computePostCutoverWriteCount(cdm *dataSupport.Data_supportCLPA, addr string) uint64 {
+	keys, ok := cdm.PostCutoverWriteSet[addr]
+	if !ok {
+		return 0
+	}
+	return uint64(len(keys))
+}
+
 func canRetireAddress(cdm *dataSupport.Data_supportCLPA, addr string) bool {
 	if !cdm.HydratedAccounts[addr] {
+		return false
+	}
+	if computePostCutoverWriteCount(cdm, addr) != 0 {
 		return false
 	}
 	return computeDebtRootCleared(cdm, addr)
@@ -643,35 +712,17 @@ func handleRetirementProofCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.D
 	if !ok || cap == nil {
 		return
 	}
-	if cap.CurrentShard != proof.FromShard || cap.TargetShard != proof.ToShard || cap.EpochTag != proof.EpochTag {
+	if cap.RVCID != proof.RVCID || cap.CurrentShard != proof.FromShard || cap.TargetShard != proof.ToShard || cap.EpochTag != proof.EpochTag {
 		return
 	}
-	if cap.RVCID != "" && cap.RVCID != proof.RVCID {
+	if _, ok := cdm.RVCPool[proof.RVCID]; !ok {
 		return
 	}
 	if _, ok := cdm.SourceCustodyState[proof.Addr]; !ok {
 		return
 	}
-	if proof.ProtocolVersion == "" || proof.CircuitVersion == "" || proof.VerifierKeyID == "" || proof.ProofSystem == "" || len(proof.ProofBytes) == 0 || proof.ProofDigest == "" {
+	if !validateRetirementProofAgainstState(cdm, proof, cap) {
 		return
-	}
-	if proof.AccountBinding != hashTextToFieldString(proof.Addr) {
-		return
-	}
-	if proof.RVCBinding != buildCertificateBinding(proof.RVCID) {
-		return
-	}
-	if proof.RetirementWitnessDigest != buildRetirementWitnessDigest(proof) {
-		return
-	}
-	expectedInputs := buildRetirementPublicInputs(proof)
-	if len(expectedInputs) != len(proof.PublicInputs) {
-		return
-	}
-	for i := range expectedInputs {
-		if expectedInputs[i] != proof.PublicInputs[i] {
-			return
-		}
 	}
 	if !zkBackend.VerifyRetirementProof(proof) {
 		return
@@ -680,6 +731,7 @@ func handleRetirementProofCommon(pbftNode *PbftConsensusNode, cdm *dataSupport.D
 	cdm.RetiredAccounts[proof.Addr] = true
 	delete(cdm.SourceCustodyState, proof.Addr)
 	delete(cdm.ShadowInstallHeight, proof.Addr)
+	delete(cdm.PostCutoverWriteSet, proof.Addr)
 	pbftNode.CurChain.DeleteAccounts([]string{proof.Addr})
 }
 
@@ -694,20 +746,48 @@ func maybeSendRetirementProof(pbftNode *PbftConsensusNode, cdm *dataSupport.Data
 	if !ok || cap == nil || !canRetireAddress(cdm, addr) {
 		return
 	}
-	proof, receiptWitnesses, ok := buildRetirementProofEnvelope(cdm, cap, addr, epochTag)
-	if !ok || proof == nil {
+	bundle := buildRetirementWitnessBundle(cdm, addr)
+	settledCount := uint64(len(bundle.SettledReceiptKeys))
+	outstandingCount := uint64(len(bundle.OutstandingReceiptKeys))
+	postWriteCount := uint64(len(bundle.PostCutoverWriteKeys))
+	addressBinding := buildCertificateBinding(addr)
+	rvcBinding := buildCertificateBinding(cap.RVCID)
+	debtDigest := buildRetirementDebtWitnessDigest(bundle.SettledReceiptKeys, bundle.OutstandingReceiptKeys)
+	noWriteDigest := buildNoWriteWitnessDigest(bundle.PostCutoverWriteKeys)
+	retirementDigest := buildRetirementWitnessDigest(addressBinding, epochTag, cap.CurrentShard, cap.TargetShard, settledCount, outstandingCount, postWriteCount, debtDigest, noWriteDigest, rvcBinding)
+	proof := &message.RetirementProof{
+		Addr:                    addr,
+		EpochTag:                epochTag,
+		FromShard:               cap.CurrentShard,
+		ToShard:                 cap.TargetShard,
+		Hydrated:                true,
+		DebtRootCleared:         computeDebtRootCleared(cdm, addr),
+		SettledReceiptCount:     settledCount,
+		OutstandingReceiptCount: outstandingCount,
+		PostCutoverWriteCount:   postWriteCount,
+		AddressBinding:          addressBinding,
+		RVCBinding:              rvcBinding,
+		DebtWitnessDigest:       debtDigest,
+		NoWriteWitnessDigest:    noWriteDigest,
+		RetirementWitnessDigest: retirementDigest,
+		RVCID:                   cap.RVCID,
+		ProtocolVersion:         "zkscar-retirement-v1",
+		CircuitVersion:          "retirement-finality-groth16-v1",
+		VerifierKeyID:           "zkscar-retirement-groth16-v1",
+	}
+	if !proof.DebtRootCleared || proof.OutstandingReceiptCount != 0 || proof.PostCutoverWriteCount != 0 {
 		return
 	}
-	proofSystem, verifierKeyID, proofBytes, proofDigest, proofMode := zkBackend.BuildRetirementProof(proof, receiptWitnesses, nil)
-	if proofSystem == "" || verifierKeyID == "" || len(proofBytes) == 0 || proofDigest == "" {
-		log.Panic("strict retirement proof generation failed")
-	}
+	proof.PublicInputs = expectedRetirementPublicInputs(proof)
+	proofSystem, verifierKeyID, proofBytes, proofDigest, proofMode := zkBackend.BuildRetirementProof(proof, bundle)
 	proof.ProofSystem = proofSystem
 	proof.VerifierKeyID = verifierKeyID
 	proof.ProofBytes = proofBytes
 	proof.ProofDigest = proofDigest
 	proof.ProofMode = proofMode
-
+	if proof.ProofSystem == "" || proof.VerifierKeyID == "" || len(proof.ProofBytes) == 0 || proof.ProofDigest == "" {
+		log.Panic("strict retirement proof generation failed")
+	}
 	cdm.RetirementProofPool[addr] = proof
 	b, err := json.Marshal(proof)
 	if err != nil {

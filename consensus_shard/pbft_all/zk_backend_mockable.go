@@ -20,7 +20,7 @@ type ZKBackend interface {
 	BuildChunkProof(commitment, hash string, idx, total uint64, siblings []string) (proofSystem string, proof string)
 	VerifyChunkProof(proofSystem, verifierKeyID, commitment, hash, proof string, idx, total uint64) bool
 
-	BuildRetirementProof(proof *message.RetirementProof, receipts []retirementReceiptWitness, writeKeys []string) (proofSystem string, verifierKeyID string, proofBytes []byte, proofDigest string, proofMode string)
+	BuildRetirementProof(proof *message.RetirementProof, bundle *retirementWitnessBundle) (proofSystem string, verifierKeyID string, proofBytes []byte, proofDigest string, proofMode string)
 	VerifyRetirementProof(proof *message.RetirementProof) bool
 }
 
@@ -63,27 +63,26 @@ type externalChunkProofRequest struct {
 }
 
 type externalRetirementProofRequest struct {
-	ProtocolVersion         string                     `json:"protocol_version"`
-	CircuitVersion          string                     `json:"circuit_version"`
-	VerifierKeyID           string                     `json:"verifier_key_id"`
-	Addr                    string                     `json:"addr"`
-	AccountBinding          string                     `json:"account_binding"`
-	RVCID                   string                     `json:"rvc_id"`
-	RVCBinding              string                     `json:"rvc_binding"`
-	EpochTag                uint64                     `json:"epoch_tag"`
-	FromShard               uint64                     `json:"from_shard"`
-	ToShard                 uint64                     `json:"to_shard"`
-	HydratedFlag            bool                       `json:"hydrated_flag"`
-	DebtRootClearedFlag     bool                       `json:"debt_root_cleared_flag"`
-	SettledReceiptCount     uint64                     `json:"settled_receipt_count"`
-	OutstandingReceiptCount uint64                     `json:"outstanding_receipt_count"`
-	PostCutoverWriteCount   uint64                     `json:"post_cutover_write_count"`
-	DebtWitnessDigest       string                     `json:"debt_witness_digest"`
-	NoWriteWitnessDigest    string                     `json:"no_write_witness_digest"`
-	RetirementWitnessDigest string                     `json:"retirement_witness_digest"`
-	PublicInputs            []string                   `json:"public_inputs"`
-	ReceiptWitnesses        []retirementReceiptWitness `json:"receipt_witnesses,omitempty"`
-	WriteKeys               []string                   `json:"write_keys,omitempty"`
+	ProtocolVersion         string   `json:"protocol_version"`
+	CircuitVersion          string   `json:"circuit_version"`
+	VerifierKeyID           string   `json:"verifier_key_id"`
+	Addr                    string   `json:"addr"`
+	AddressBinding          string   `json:"address_binding"`
+	EpochTag                uint64   `json:"epoch_tag"`
+	FromShard               uint64   `json:"from_shard"`
+	ToShard                 uint64   `json:"to_shard"`
+	HydratedFlag            uint64   `json:"hydrated_flag"`
+	DebtRootClearedFlag     uint64   `json:"debt_root_cleared_flag"`
+	SettledReceiptCount     uint64   `json:"settled_receipt_count"`
+	OutstandingReceiptCount uint64   `json:"outstanding_receipt_count"`
+	PostCutoverWriteCount   uint64   `json:"post_cutover_write_count"`
+	DebtWitnessDigest       string   `json:"debt_witness_digest"`
+	NoWriteWitnessDigest    string   `json:"no_write_witness_digest"`
+	RetirementWitnessDigest string   `json:"retirement_witness_digest"`
+	RVCID                   string   `json:"rvc_id"`
+	RVCBinding              string   `json:"rvc_binding"`
+	PublicInputs            []string `json:"public_inputs"`
+	WitnessBundleB64        string   `json:"witness_bundle_b64,omitempty"`
 
 	ProofSystem   string `json:"proof_system,omitempty"`
 	ProofDigest   string `json:"proof_digest,omitempty"`
@@ -177,6 +176,14 @@ func witnessBundleB64(rvc *message.ReshardingValidityCertificate) string {
 		StateWitnesses:    rvc.StateWitnesses,
 		SemanticWitnesses: rvc.SemanticWitnesses,
 	})
+	return base64.StdEncoding.EncodeToString(raw)
+}
+
+func retirementBundleB64(bundle *retirementWitnessBundle) string {
+	if bundle == nil {
+		return ""
+	}
+	raw, _ := json.Marshal(bundle)
 	return base64.StdEncoding.EncodeToString(raw)
 }
 
@@ -292,34 +299,41 @@ func (b *backendDispatch) VerifyChunkProof(proofSystem, verifierKeyID, commitmen
 	return resp.Valid
 }
 
-func (b *backendDispatch) BuildRetirementProof(proof *message.RetirementProof, receipts []retirementReceiptWitness, writeKeys []string) (string, string, []byte, string, string) {
+func (b *backendDispatch) BuildRetirementProof(proof *message.RetirementProof, bundle *retirementWitnessBundle) (string, string, []byte, string, string) {
 	command := strings.TrimSpace(os.Getenv("ZKSCAR_EXTERNAL_RETIREMENT_PROVER"))
 	if command == "" {
 		command = defaultExternalCommand("retirement_prover")
 	}
 	resp := new(externalProofResponse)
+	hydratedFlag := uint64(0)
+	if proof.Hydrated {
+		hydratedFlag = 1
+	}
+	debtRootClearedFlag := uint64(0)
+	if proof.DebtRootCleared {
+		debtRootClearedFlag = 1
+	}
 	req := &externalRetirementProofRequest{
 		ProtocolVersion:         proof.ProtocolVersion,
 		CircuitVersion:          proof.CircuitVersion,
 		VerifierKeyID:           proof.VerifierKeyID,
 		Addr:                    proof.Addr,
-		AccountBinding:          proof.AccountBinding,
-		RVCID:                   proof.RVCID,
-		RVCBinding:              proof.RVCBinding,
+		AddressBinding:          proof.AddressBinding,
 		EpochTag:                proof.EpochTag,
 		FromShard:               proof.FromShard,
 		ToShard:                 proof.ToShard,
-		HydratedFlag:            proof.Hydrated,
-		DebtRootClearedFlag:     proof.DebtRootCleared,
+		HydratedFlag:            hydratedFlag,
+		DebtRootClearedFlag:     debtRootClearedFlag,
 		SettledReceiptCount:     proof.SettledReceiptCount,
 		OutstandingReceiptCount: proof.OutstandingReceiptCount,
 		PostCutoverWriteCount:   proof.PostCutoverWriteCount,
 		DebtWitnessDigest:       proof.DebtWitnessDigest,
 		NoWriteWitnessDigest:    proof.NoWriteWitnessDigest,
 		RetirementWitnessDigest: proof.RetirementWitnessDigest,
+		RVCID:                   proof.RVCID,
+		RVCBinding:              proof.RVCBinding,
 		PublicInputs:            proof.PublicInputs,
-		ReceiptWitnesses:        receipts,
-		WriteKeys:               writeKeys,
+		WitnessBundleB64:        retirementBundleB64(bundle),
 	}
 	if err := runExternalBackend(command, req, resp); err != nil || !resp.OK {
 		return "", proof.VerifierKeyID, nil, "", "external-error"
@@ -338,25 +352,33 @@ func (b *backendDispatch) VerifyRetirementProof(proof *message.RetirementProof) 
 		command = defaultExternalCommand("retirement_verifier")
 	}
 	resp := new(externalProofResponse)
+	hydratedFlag := uint64(0)
+	if proof.Hydrated {
+		hydratedFlag = 1
+	}
+	debtRootClearedFlag := uint64(0)
+	if proof.DebtRootCleared {
+		debtRootClearedFlag = 1
+	}
 	req := &externalRetirementProofRequest{
 		ProtocolVersion:         proof.ProtocolVersion,
 		CircuitVersion:          proof.CircuitVersion,
 		VerifierKeyID:           proof.VerifierKeyID,
 		Addr:                    proof.Addr,
-		AccountBinding:          proof.AccountBinding,
-		RVCID:                   proof.RVCID,
-		RVCBinding:              proof.RVCBinding,
+		AddressBinding:          proof.AddressBinding,
 		EpochTag:                proof.EpochTag,
 		FromShard:               proof.FromShard,
 		ToShard:                 proof.ToShard,
-		HydratedFlag:            proof.Hydrated,
-		DebtRootClearedFlag:     proof.DebtRootCleared,
+		HydratedFlag:            hydratedFlag,
+		DebtRootClearedFlag:     debtRootClearedFlag,
 		SettledReceiptCount:     proof.SettledReceiptCount,
 		OutstandingReceiptCount: proof.OutstandingReceiptCount,
 		PostCutoverWriteCount:   proof.PostCutoverWriteCount,
 		DebtWitnessDigest:       proof.DebtWitnessDigest,
 		NoWriteWitnessDigest:    proof.NoWriteWitnessDigest,
 		RetirementWitnessDigest: proof.RetirementWitnessDigest,
+		RVCID:                   proof.RVCID,
+		RVCBinding:              proof.RVCBinding,
 		PublicInputs:            proof.PublicInputs,
 		ProofSystem:             proof.ProofSystem,
 		ProofDigest:             proof.ProofDigest,
@@ -381,4 +403,8 @@ func expectedStrictRVCPublicInputs(rvc *message.ReshardingValidityCertificate) [
 		buildWitnessBundleBinding(rvc.WitnessBundleHash),
 		buildCertificateBinding(rvc.CertificateID),
 	}
+}
+
+func expectedStrictRetirementPublicInputs(proof *message.RetirementProof) []string {
+	return expectedRetirementPublicInputs(proof)
 }

@@ -33,7 +33,7 @@ snarkjs zkey export verificationkey "$ART/chunk_membership/chunk_membership_fina
 
 circom "$CIR/retirement_finality.circom" --r1cs --wasm --sym -o "$ART/retirement_finality"
 snarkjs groth16 setup "$ART/retirement_finality/retirement_finality.r1cs" "$PTAU" "$ART/retirement_finality/retirement_finality_0000.zkey"
-snarkjs zkey contribute "$ART/retirement_finality/retirement_finality_0000.zkey" "$ART/retirement_finality/retirement_finality_final.zkey" --name="ZKSCAR-RETIREMENT" -v -e="retirement"
+snarkjs zkey contribute "$ART/retirement_finality/retirement_finality_0000.zkey" "$ART/retirement_finality/retirement_finality_final.zkey" --name="ZKSCAR-RETIRE" -v -e="retire"
 snarkjs zkey export verificationkey "$ART/retirement_finality/retirement_finality_final.zkey" "$ART/retirement_finality/verification_key.json"
 
 echo "Artifacts built under $ART"
