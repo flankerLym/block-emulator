@@ -39,11 +39,30 @@ type HydrationData struct {
 }
 
 type RetirementProof struct {
-	Addr            string
-	EpochTag        uint64
-	FromShard       uint64
-	ToShard         uint64
+	Addr      string
+	EpochTag  uint64
+	FromShard uint64
+	ToShard   uint64
+
 	Hydrated        bool
 	DebtRootCleared bool
 	RVCID           string
+
+	// ---- public statement ----
+	ProtocolVersion         string
+	CircuitVersion          string
+	VerifierKeyID           string
+	SettledReceiptCount     uint64
+	OutstandingReceiptCount uint64
+	PostCutoverWriteCount   uint64
+	DebtWitnessDigest       string
+	NoWriteWitnessDigest    string
+	RetirementWitnessDigest string
+	PublicInputs            []string
+
+	// ---- proof payload ----
+	ProofSystem string
+	ProofBytes  []byte
+	ProofDigest string
+	ProofMode   string
 }
