@@ -72,6 +72,25 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) HandleinPrepare(pmsg *messag
 	return true
 }
 
+// broker1 transactions may still be committed on the source shard during the
+// phase-1 handoff window. Once ownership overlay has been installed, the source
+// shard no longer appears as the official owner in Get_PartitionMap(), so the
+// original invariant check becomes too strict and panics on valid in-flight tx1.
+// We therefore allow tx1 to continue on a shard if that shard is the pre-cutover
+// source side of a shadow handoff for the sender account.
+func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) allowBroker1SenderOnCurrentShard(tx *core.Transaction, senderIsInShard bool) bool {
+	if senderIsInShard {
+		return true
+	}
+	owner, ok := cphm.pbftNode.CurChain.GetShadowOwner(tx.Sender)
+	if !ok {
+		return false
+	}
+	// A different shadow owner means the current shard is the old source shard
+	// that is allowed to finish in-flight broker1 work before full reconciliation.
+	return owner != cphm.pbftNode.ShardID
+}
+
 // the operation in commit.
 func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) HandleinCommit(cmsg *message.Commit) bool {
 	r := cphm.pbftNode.requestPool[string(cmsg.Digest)]
@@ -104,7 +123,9 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) HandleinCommit(cmsg *message
 
 			senderIsInshard := cphm.pbftNode.CurChain.Get_PartitionMap(tx.Sender) == cphm.pbftNode.ShardID
 			recipientIsInshard := cphm.pbftNode.CurChain.Get_PartitionMap(tx.Recipient) == cphm.pbftNode.ShardID
-			if isBroker1Tx && !senderIsInshard {
+			broker1SenderAllowed := cphm.allowBroker1SenderOnCurrentShard(tx, senderIsInshard)
+
+			if isBroker1Tx && !broker1SenderAllowed {
 				log.Panic("Err tx1")
 			}
 			if isBroker2Tx && !recipientIsInshard {
@@ -115,7 +136,7 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) HandleinCommit(cmsg *message
 					if tx.SenderIsBroker && !recipientIsInshard {
 						log.Panic("err tx 1 - recipient")
 					}
-					if !tx.SenderIsBroker && !senderIsInshard {
+					if !tx.SenderIsBroker && !broker1SenderAllowed {
 						log.Panic("err tx 1 - sender")
 					}
 				} else {
