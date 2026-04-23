@@ -37,6 +37,10 @@ type Data_supportCLPA struct {
 
 	HydrationLock sync.Mutex
 
+	// Serializes partition-account-transfer apply to prevent duplicate commit goroutines
+	// from mutating shared CLPA maps concurrently.
+	AccountTransferApplyLock sync.Mutex
+
 	ShadowInstallHeight map[string]uint64
 
 	RVCPool               map[string]*message.ReshardingValidityCertificate
