@@ -6,6 +6,7 @@ import (
 	"blockEmulator/message"
 	"blockEmulator/networks"
 	"blockEmulator/params"
+	"blockEmulator/utils"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -72,23 +73,44 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) HandleinPrepare(pmsg *messag
 	return true
 }
 
-// broker1 transactions may still be committed on the source shard during the
-// phase-1 handoff window. Once ownership overlay has been installed, the source
-// shard no longer appears as the official owner in Get_PartitionMap(), so the
-// original invariant check becomes too strict and panics on valid in-flight tx1.
-// We therefore allow tx1 to continue on a shard if that shard is the pre-cutover
-// source side of a shadow handoff for the sender account.
+// previousOwnerOfSender returns the owner shard before the latest committed
+// repartition. If there is no historical repartition record, it falls back to
+// the default address hashing rule used by the original system.
+func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) previousOwnerOfSender(addr string) uint64 {
+	if len(cphm.cdm.ModifiedMap) >= 2 {
+		if owner, ok := cphm.cdm.ModifiedMap[len(cphm.cdm.ModifiedMap)-2][addr]; ok {
+			return owner
+		}
+	}
+	return uint64(utils.Addr2Shard(addr))
+}
+
+// broker1 transactions may still be committed on the old source shard during
+// the phase-1 handoff window. After cutover, Get_PartitionMap(sender) returns
+// the new owner shard, so the original invariant check becomes too strict and
+// incorrectly panics on valid in-flight broker1 txs.
+//
+// We allow broker1 to continue on the current shard iff:
+//  1. it is not already recognized as local by the new owner map,
+//  2. it is a real broker1 tx (RawTxHash != nil and Sender == OriginalSender),
+//  3. the current shard was the sender's owner before the latest cutover, and
+//  4. the current shard is no longer the sender's owner after cutover.
 func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) allowBroker1SenderOnCurrentShard(tx *core.Transaction, senderIsInShard bool) bool {
 	if senderIsInShard {
 		return true
 	}
-	owner, ok := cphm.pbftNode.CurChain.GetShadowOwner(tx.Sender)
-	if !ok {
+	if tx == nil {
 		return false
 	}
-	// A different shadow owner means the current shard is the old source shard
-	// that is allowed to finish in-flight broker1 work before full reconciliation.
-	return owner != cphm.pbftNode.ShardID
+	if tx.RawTxHash == nil {
+		return false
+	}
+	if tx.Sender != tx.OriginalSender {
+		return false
+	}
+	prevOwner := cphm.previousOwnerOfSender(tx.Sender)
+	curOwner := cphm.pbftNode.CurChain.Get_PartitionMap(tx.Sender)
+	return prevOwner == cphm.pbftNode.ShardID && curOwner != cphm.pbftNode.ShardID
 }
 
 // the operation in commit.
