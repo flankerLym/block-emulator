@@ -76,13 +76,43 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendAccounts_and_Txs() {
 		addrSend := make([]string, 0)
 		addrSet := make(map[string]bool)
 		asSend := make([]*core.AccountState, 0)
+		capsules := make([]message.ExecutionShadowCapsule, 0)
 		for idx, addr := range accountToFetch {
 			if cphm.cdm.ModifiedMap[lastMapid][addr] == i {
 				addrSend = append(addrSend, addr)
 				addrSet[addr] = true
 				asSend = append(asSend, asFetched[idx])
+				capsules = append(capsules, message.ExecutionShadowCapsule{
+					Addr:        addr,
+					SourceShard: cphm.pbftNode.ShardID,
+					TargetShard: i,
+					Balance:     asFetched[idx].Balance,
+					Nonce:       asFetched[idx].Nonce,
+					CodeHash:    asFetched[idx].CodeHash,
+					StorageRoot: asFetched[idx].StorageRoot,
+					EpochTag:    uint64(lastMapid + 1),
+				})
 			}
 		}
+
+		if len(capsules) != 0 {
+			scb := message.ShadowCapsuleBatch{
+				FromShard: cphm.pbftNode.ShardID,
+				ToShard:   i,
+				EpochTag:  uint64(lastMapid + 1),
+				Capsules:  capsules,
+			}
+			scByte, err := json.Marshal(scb)
+			if err != nil {
+				log.Panic()
+			}
+			scMsg := message.MergeMessage(message.CShadowCapsule, scByte)
+			for nid := uint64(0); nid < cphm.pbftNode.pbftChainConfig.Nodes_perShard; nid++ {
+				networks.TcpDial(scMsg, cphm.pbftNode.ip_nodeTable[i][nid])
+			}
+			cphm.pbftNode.pl.Plog.Printf("Phase1 shadow capsules sent to shard %d, capsule count=%d\n", i, len(capsules))
+		}
+
 		// fetch transactions to it, after the transactions is fetched, delete it in the pool
 		txSend := make([]*core.Transaction, 0)
 		firstPtr := 0
@@ -206,8 +236,19 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) accountTransfer_do(atm *mess
 		cphm.pbftNode.CurChain.Update_PartitionMap(key, val)
 	}
 	cphm.pbftNode.pl.Plog.Printf("%d key-vals are updated\n", cnt)
-	// add the account into the state trie
-	cphm.pbftNode.CurChain.AddAccounts(atm.Addrs, atm.AccountState, cphm.pbftNode.view.Load())
+
+	addrsToAdd := make([]string, 0, len(atm.Addrs))
+	statesToAdd := make([]*core.AccountState, 0, len(atm.AccountState))
+	for idx, addr := range atm.Addrs {
+		if cphm.pbftNode.CurChain.HasAccountState(addr) {
+			continue
+		}
+		addrsToAdd = append(addrsToAdd, addr)
+		statesToAdd = append(statesToAdd, atm.AccountState[idx])
+	}
+	cphm.pbftNode.pl.Plog.Printf("%d addrs to add after shadow reconciliation\n", len(addrsToAdd))
+	cphm.pbftNode.CurChain.AddAccounts(addrsToAdd, statesToAdd, cphm.pbftNode.view.Load())
+	cphm.pbftNode.CurChain.ClearShadowAccounts(atm.Addrs)
 
 	if uint64(len(cphm.cdm.ModifiedMap)) != atm.ATid {
 		cphm.cdm.ModifiedMap = append(cphm.cdm.ModifiedMap, atm.ModifiedMap)

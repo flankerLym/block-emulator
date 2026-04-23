@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/gob"
 	"log"
+	"math/big"
 )
 
 var (
@@ -12,12 +13,15 @@ var (
 	PartitionReq        RequestType = "PartitionReq"
 	CPartitionMsg       MessageType = "PartitionModifiedMap"
 	CPartitionReady     MessageType = "ready for partition"
+	CShadowCapsule      MessageType = "ShadowCapsule"
 )
 
 type PartitionModifiedMap struct {
 	PartitionModified map[string]uint64
 }
 
+// AccountTransferMsg is the original CLPA commit payload.
+// In phase-1 we keep it for the full migration / reconciliation stage.
 type AccountTransferMsg struct {
 	ModifiedMap  map[string]uint64
 	Addrs        []string
@@ -36,6 +40,29 @@ type AccountStateAndTx struct {
 	AccountState []*core.AccountState
 	Txs          []*core.Transaction
 	FromShard    uint64
+}
+
+// ExecutionShadowCapsule is the phase-1 execution capsule used for
+// ownership-first, state-light takeover. It intentionally carries only
+// the minimum executable account semantics.
+type ExecutionShadowCapsule struct {
+	Addr        string
+	SourceShard uint64
+	TargetShard uint64
+	Balance     *big.Int
+	Nonce       uint64
+	CodeHash    []byte
+	StorageRoot []byte
+	EpochTag    uint64
+}
+
+// ShadowCapsuleBatch is the transport unit sent from source shard to
+// every replica in target shard before the full account-transfer commit.
+type ShadowCapsuleBatch struct {
+	FromShard uint64
+	ToShard   uint64
+	EpochTag  uint64
+	Capsules  []ExecutionShadowCapsule
 }
 
 func (atm *AccountTransferMsg) Encode() []byte {

@@ -63,6 +63,12 @@ func (bc *BlockChain) Update_PartitionMap(key string, val uint64) {
 
 // Get parition (if not exist, return default)
 func (bc *BlockChain) Get_PartitionMap(key string) uint64 {
+	// Phase-1 ownership-first overlay: if a shadow capsule has already been
+	// installed locally, the shadow owner takes precedence before the official
+	// partition map is fully committed.
+	if owner, ok := bc.GetShadowOwner(key); ok {
+		return owner
+	}
 	bc.pmlock.RLock()
 	defer bc.pmlock.RUnlock()
 	if _, ok := bc.PartitionMap[key]; !ok {
@@ -91,21 +97,22 @@ func (bc *BlockChain) GetUpdateStatusTrie(txs []*core.Transaction) common.Hash {
 	cnt := 0
 	// handle transactions, the signature check is ignored here
 	for i, tx := range txs {
-		// fmt.Printf("tx %d: %s, %s\n", i, tx.Sender, tx.Recipient)
-		// senderIn := false
 		if !tx.Relayed && (bc.Get_PartitionMap(tx.Sender) == bc.ChainConfig.ShardID || tx.HasBroker) {
-			// senderIn = true
-			// fmt.Printf("the sender %s is in this shard %d, \n", tx.Sender, bc.ChainConfig.ShardID)
-			// modify local accountstate
 			s_state_enc, _ := st.Get([]byte(tx.Sender))
 			var s_state *core.AccountState
 			if s_state_enc == nil {
-				// fmt.Println("missing account SENDER, now adding account")
-				ib := new(big.Int)
-				ib.Add(ib, params.Init_Balance)
-				s_state = &core.AccountState{
-					Nonce:   uint64(i),
-					Balance: ib,
+				// Phase-1 fast takeover: if the account has already been installed as a
+				// local shadow account, bootstrap execution from that capsule snapshot
+				// rather than fabricating a fresh Init_Balance account.
+				if shadowState, ok := bc.GetShadowAccount(tx.Sender); ok {
+					s_state = shadowState
+				} else {
+					ib := new(big.Int)
+					ib.Add(ib, params.Init_Balance)
+					s_state = &core.AccountState{
+						Nonce:   uint64(i),
+						Balance: ib,
+					}
 				}
 			} else {
 				s_state = core.DecodeAS(s_state_enc)
@@ -119,20 +126,19 @@ func (bc *BlockChain) GetUpdateStatusTrie(txs []*core.Transaction) common.Hash {
 			st.Update([]byte(tx.Sender), s_state.Encode())
 			cnt++
 		}
-		// recipientIn := false
 		if bc.Get_PartitionMap(tx.Recipient) == bc.ChainConfig.ShardID || tx.HasBroker {
-			// fmt.Printf("the recipient %s is in this shard %d, \n", tx.Recipient, bc.ChainConfig.ShardID)
-			// recipientIn = true
-			// modify local state
 			r_state_enc, _ := st.Get([]byte(tx.Recipient))
 			var r_state *core.AccountState
 			if r_state_enc == nil {
-				// fmt.Println("missing account RECIPIENT, now adding account")
-				ib := new(big.Int)
-				ib.Add(ib, params.Init_Balance)
-				r_state = &core.AccountState{
-					Nonce:   uint64(i),
-					Balance: ib,
+				if shadowState, ok := bc.GetShadowAccount(tx.Recipient); ok {
+					r_state = shadowState
+				} else {
+					ib := new(big.Int)
+					ib.Add(ib, params.Init_Balance)
+					r_state = &core.AccountState{
+						Nonce:   uint64(i),
+						Balance: ib,
+					}
 				}
 			} else {
 				r_state = core.DecodeAS(r_state_enc)
@@ -506,7 +512,6 @@ func (bc *BlockChain) PrintBlockChain() string {
 		bc.CurrentBlock.Header.StateRoot,
 		bc.CurrentBlock.Header.Time,
 		bc.triedb,
-		// len(bc.Txpool.RelayPool[1]),
 	}
 	res := fmt.Sprintf("%v\n", vals)
 	fmt.Println(res)

@@ -28,6 +28,8 @@ func (cbom *CLPABrokerOutsideModule) HandleMessageOutsidePBFT(msgType message.Me
 		cbom.handleAccountStateAndTxMsg(content)
 	case message.CPartitionReady:
 		cbom.handlePartitionReady(content)
+	case message.CShadowCapsule:
+		cbom.handleShadowCapsule(content)
 	default:
 	}
 	return true
@@ -104,4 +106,18 @@ func (cbom *CLPABrokerOutsideModule) handleAccountStateAndTxMsg(content []byte) 
 		cbom.cdm.CollectLock.Unlock()
 		cbom.pbftNode.pl.Plog.Printf("S%dN%d has added all accoutStateandTx~~~\n", cbom.pbftNode.ShardID, cbom.pbftNode.NodeID)
 	}
+}
+
+func (cbom *CLPABrokerOutsideModule) handleShadowCapsule(content []byte) {
+	scb := new(message.ShadowCapsuleBatch)
+	if err := json.Unmarshal(content, scb); err != nil {
+		log.Panic(err)
+	}
+	if scb.ToShard != cbom.pbftNode.ShardID {
+		return
+	}
+	for idx := range scb.Capsules {
+		cbom.pbftNode.CurChain.InstallShadowCapsule(&scb.Capsules[idx])
+	}
+	cbom.pbftNode.pl.Plog.Printf("S%dN%d installed %d shadow capsules for epoch %d\n", cbom.pbftNode.ShardID, cbom.pbftNode.NodeID, len(scb.Capsules), scb.EpochTag)
 }

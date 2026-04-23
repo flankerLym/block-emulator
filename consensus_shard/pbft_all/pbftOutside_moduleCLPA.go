@@ -31,6 +31,8 @@ func (crom *CLPARelayOutsideModule) HandleMessageOutsidePBFT(msgType message.Mes
 		crom.handleAccountStateAndTxMsg(content)
 	case message.CPartitionReady:
 		crom.handlePartitionReady(content)
+	case message.CShadowCapsule:
+		crom.handleShadowCapsule(content)
 	default:
 	}
 	return true
@@ -135,4 +137,18 @@ func (crom *CLPARelayOutsideModule) handleAccountStateAndTxMsg(content []byte) {
 		crom.cdm.CollectLock.Unlock()
 		crom.pbftNode.pl.Plog.Printf("S%dN%d has added all accoutStateandTx~~~\n", crom.pbftNode.ShardID, crom.pbftNode.NodeID)
 	}
+}
+
+func (crom *CLPARelayOutsideModule) handleShadowCapsule(content []byte) {
+	scb := new(message.ShadowCapsuleBatch)
+	if err := json.Unmarshal(content, scb); err != nil {
+		log.Panic(err)
+	}
+	if scb.ToShard != crom.pbftNode.ShardID {
+		return
+	}
+	for idx := range scb.Capsules {
+		crom.pbftNode.CurChain.InstallShadowCapsule(&scb.Capsules[idx])
+	}
+	crom.pbftNode.pl.Plog.Printf("S%dN%d installed %d shadow capsules for epoch %d\n", crom.pbftNode.ShardID, crom.pbftNode.NodeID, len(scb.Capsules), scb.EpochTag)
 }
