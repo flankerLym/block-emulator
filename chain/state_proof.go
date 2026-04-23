@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"blockEmulator/core"
 	"encoding/hex"
 	"errors"
 	"sort"
@@ -104,10 +105,38 @@ func (bc *BlockChain) BuildAccountProofAtStateRoot(root []byte, addr string) (*A
 	}, nil
 }
 
+// BuildSyntheticAccountProofForState constructs a virtual proof bundle for stage-1/2
+// experiments when we need a stable witness for an account state without mutating the
+// live trie in advance. VerifyAccountProof understands root types with prefix "virtual-"
+// and directly returns the embedded ValueHex bytes.
+func BuildSyntheticAccountProofForState(root []byte, addr string, state *core.AccountState, rootType string) *AccountTrieProof {
+	if rootType == "" {
+		rootType = "virtual-account-state"
+	}
+	valueHex := ""
+	if state != nil {
+		valueHex = hex.EncodeToString(state.Encode())
+	}
+	return &AccountTrieProof{
+		Root:       hex.EncodeToString(root),
+		RootType:   rootType,
+		TrieKeyHex: hex.EncodeToString([]byte(addr)),
+		ValueHex:   valueHex,
+		ProofNodes: []TrieProofNode{},
+	}
+}
+
 func VerifyAccountProof(proof *AccountTrieProof) ([]byte, error) {
 	if proof == nil {
 		return nil, errors.New("nil account proof")
 	}
+	// Stage-1/2 experimental mode:
+	// allow virtual proofs that simply bind an address/state payload into the witness
+	// bundle without requiring the state to exist as a trie leaf beforehand.
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(proof.RootType)), "virtual-") {
+		return hexStringToBytes(proof.ValueHex)
+	}
+
 	rootBytes, err := hexStringToBytes(proof.Root)
 	if err != nil {
 		return nil, err

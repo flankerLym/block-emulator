@@ -224,10 +224,15 @@ func (zcm *ZKSCARCommitteeModule) partitionMapSend(pm message.PartitionModifiedM
 	}
 
 	sendMsg := message.MergeMessage(message.CPartitionMsg, pmByte)
-	for i := uint64(0); i < uint64(params.ShardNum); i++ {
-		go networks.TcpDial(sendMsg, zcm.IpNodeTable[i][0])
+
+	// 与 broker 版本保持一致：partition map 直接发给所有节点，
+	// 避免只依赖 node0 持有重分片控制面状态。
+	for sid := uint64(0); sid < uint64(params.ShardNum); sid++ {
+		for nid := uint64(0); nid < uint64(params.NodesInShard); nid++ {
+			go networks.TcpDial(sendMsg, zcm.IpNodeTable[sid][nid])
+		}
 	}
-	zcm.sl.Slog.Println("Supervisor: all ZK-SCAR partition map messages have been sent.")
+	zcm.sl.Slog.Println("Supervisor: all ZK-SCAR partition map messages have been sent to all nodes.")
 }
 
 func (zcm *ZKSCARCommitteeModule) zkscarReset() {

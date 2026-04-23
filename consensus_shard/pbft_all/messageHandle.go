@@ -53,8 +53,12 @@ func (p *PbftConsensusNode) Propose() {
 				p.sequenceLock.Lock()
 				p.pl.Plog.Printf("S%dN%d get sequenceLock locked, now trying to propose...\n", p.ShardID, p.NodeID)
 				// propose
-				// implement interface to generate propose
-				_, r := p.ihm.HandleinPropose()
+				ok, r := p.ihm.HandleinPropose()
+				if !ok || r == nil {
+					p.pl.Plog.Printf("S%dN%d : propose aborted before request construction\n", p.ShardID, p.NodeID)
+					p.sequenceLock.Unlock()
+					return
+				}
 
 				digest := getDigest(r)
 				p.requestPool[string(digest)] = r

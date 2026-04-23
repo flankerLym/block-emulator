@@ -28,6 +28,11 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) HandleinPropose() (bool, *me
 		cphm.sendPartitionReady()
 		waitTicks := 0
 		for !cphm.getPartitionReady() {
+			// view-change 后旧 leader 必须立刻退出，不再继续占着 sequenceLock/collect loop。
+			if uint64(cphm.pbftNode.view.Load()) != cphm.pbftNode.NodeID {
+				cphm.pbftNode.pl.Plog.Printf("S%dN%d : abort partition propose due to leadership change while waiting ready barrier\n", cphm.pbftNode.ShardID, cphm.pbftNode.NodeID)
+				return false, nil
+			}
 			waitTicks++
 			if waitTicks%5 == 0 {
 				cphm.pbftNode.pl.Plog.Printf("S%dN%d : still waiting for partition-ready barrier (%d ticks)\n", cphm.pbftNode.ShardID, cphm.pbftNode.NodeID, waitTicks)
@@ -35,14 +40,26 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) HandleinPropose() (bool, *me
 			}
 			time.Sleep(time.Second)
 		}
+		if uint64(cphm.pbftNode.view.Load()) != cphm.pbftNode.NodeID {
+			cphm.pbftNode.pl.Plog.Printf("S%dN%d : abort partition propose due to leadership change before account collection\n", cphm.pbftNode.ShardID, cphm.pbftNode.NodeID)
+			return false, nil
+		}
 		cphm.sendAccounts_and_Txs()
 		collectTicks := 0
 		for !cphm.getCollectOver() {
+			if uint64(cphm.pbftNode.view.Load()) != cphm.pbftNode.NodeID {
+				cphm.pbftNode.pl.Plog.Printf("S%dN%d : abort partition propose due to leadership change while waiting account collection\n", cphm.pbftNode.ShardID, cphm.pbftNode.NodeID)
+				return false, nil
+			}
 			collectTicks++
 			if collectTicks%5 == 0 {
 				cphm.pbftNode.pl.Plog.Printf("S%dN%d : still waiting for account collection (%d ticks)\n", cphm.pbftNode.ShardID, cphm.pbftNode.NodeID, collectTicks)
 			}
 			time.Sleep(time.Second)
+		}
+		if uint64(cphm.pbftNode.view.Load()) != cphm.pbftNode.NodeID {
+			cphm.pbftNode.pl.Plog.Printf("S%dN%d : abort partition propose due to leadership change before final proposePartition\n", cphm.pbftNode.ShardID, cphm.pbftNode.NodeID)
+			return false, nil
 		}
 		return cphm.proposePartition()
 	}

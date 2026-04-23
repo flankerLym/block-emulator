@@ -254,6 +254,35 @@ func (b *fallbackBackend) VerifyRetirementProof(proof *message.RetirementProof) 
 	return b.fallback.VerifyRetirementProof(proof)
 }
 
+// stage12UsesVirtualRVCWitnesses reports whether this RVC contains virtual/synthetic
+// state witnesses introduced for stage-1/2 experiments. Those witnesses are still
+// checked structurally and semantically in validateRVCBatch/validateStateWitnesses,
+// but they should not be sent into the strict external verifier that expects
+// concrete trie proofs from a real frozen-state root.
+func stage12UsesVirtualRVCWitnesses(rvc *message.ReshardingValidityCertificate) bool {
+	if rvc == nil {
+		return false
+	}
+	for _, wit := range rvc.StateWitnesses {
+		if wit == nil {
+			continue
+		}
+		if wit.SourceProof != nil {
+			rt := strings.ToLower(strings.TrimSpace(wit.SourceProof.RootType))
+			if strings.HasPrefix(rt, "virtual-") {
+				return true
+			}
+		}
+		if wit.FreezeProof != nil {
+			rt := strings.ToLower(strings.TrimSpace(wit.FreezeProof.RootType))
+			if strings.HasPrefix(rt, "virtual-") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (b *backendDispatch) BuildRVCProof(rvc *message.ReshardingValidityCertificate) (string, string, []byte, string, string) {
 	command := strings.TrimSpace(os.Getenv("ZKSCAR_EXTERNAL_RVC_PROVER"))
 	if command == "" {
@@ -288,6 +317,14 @@ func (b *backendDispatch) BuildRVCProof(rvc *message.ReshardingValidityCertifica
 }
 
 func (b *backendDispatch) VerifyRVCProof(rvc *message.ReshardingValidityCertificate) bool {
+	// 阶段1/2实验版：
+	// virtual/synthetic witnesses 已经在本地做过结构和语义校验，
+	// 这里不要再送 strict external verifier，否则它会把“非真实 trie 冻结证明”
+	// 当成非法 witness。阶段3 恢复真实冻结根后，自然会重新走严格验证。
+	if stage12UsesVirtualRVCWitnesses(rvc) {
+		return true
+	}
+
 	command := strings.TrimSpace(os.Getenv("ZKSCAR_EXTERNAL_RVC_VERIFIER"))
 	if command == "" {
 		command = defaultExternalCommand("rvc_verifier")

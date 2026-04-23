@@ -260,10 +260,16 @@ func (zcm *ZKSCARCommitteeMod_Broker) partitionMapSend(pm message.PartitionModif
 	}
 
 	sendMsg := message.MergeMessage(message.CPartitionMsg, pmByte)
-	for i := uint64(0); i < uint64(params.ShardNum); i++ {
-		go networks.TcpDial(sendMsg, zcm.IpNodeTable[i][0])
+
+	// 阶段二可测量修复：
+	// supervisor 直接把 partition map 发到每个 shard 的所有节点，
+	// 不再只依赖 node0 本地转发。这样 view-change 后的新 leader 也能稳定持有 PartitionOn 状态。
+	for sid := uint64(0); sid < uint64(params.ShardNum); sid++ {
+		for nid := uint64(0); nid < uint64(params.NodesInShard); nid++ {
+			go networks.TcpDial(sendMsg, zcm.IpNodeTable[sid][nid])
+		}
 	}
-	zcm.sl.Slog.Println("Supervisor: all ZK-SCAR partition map messages have been sent.")
+	zcm.sl.Slog.Println("Supervisor: all ZK-SCAR partition map messages have been sent to all nodes.")
 }
 
 func (zcm *ZKSCARCommitteeMod_Broker) zkscarReset() {

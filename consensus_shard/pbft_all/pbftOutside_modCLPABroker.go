@@ -79,6 +79,19 @@ func (cbom *CLPABrokerOutsideModule) handlePartitionMsg(content []byte) {
 	if pm.Algorithm == "" {
 		pm.Algorithm = "CLPA"
 	}
+
+	// 阶段二控制面去重：
+	// 现在 supervisor 直接向所有节点广播 partition map，而 node0 仍会做 shard 内转发。
+	// 为避免 nodes 1..n 收到两份完全相同的 partition msg 后重复 append ModifiedMap，
+	// 这里按 (Algorithm, EpochTag) 做幂等处理。
+	if len(cbom.cdm.PartitionMeta) > 0 {
+		last := cbom.cdm.PartitionMeta[len(cbom.cdm.PartitionMeta)-1]
+		if last.Algorithm == pm.Algorithm && last.EpochTag == pm.EpochTag {
+			cbom.cdm.PartitionOn = true
+			return
+		}
+	}
+
 	cbom.cdm.ModifiedMap = append(cbom.cdm.ModifiedMap, pm.PartitionModified)
 	cbom.cdm.PartitionMeta = append(cbom.cdm.PartitionMeta, *pm)
 	for _, cap := range pm.ShadowCapsules {
@@ -118,8 +131,6 @@ func (cbom *CLPABrokerOutsideModule) handleAccountStateAndTxMsg(content []byte) 
 			cp := cap
 			cbom.cdm.ShadowCapsulePool[cap.Addr] = &cp
 		}
-		// 统一和主流程使用相同的 receiptKey(txHash) 索引空间，
-		// 避免 broker 路径下 dual-anchor receipt 后续查询不一致。
 		indexDualAnchorReceipts(cbom.cdm, at.DualReceipts)
 	}
 	if len(cbom.cdm.AccountStateTx) == int(cbom.pbftNode.pbftChainConfig.ShardNums)-1 {

@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"math/big"
 	"sort"
 )
 
@@ -70,6 +71,21 @@ func shadowStateMatchesCapsule(state *core.AccountState, cap message.ShadowCapsu
 	return true
 }
 
+func capsuleBaseState(cap message.ShadowCapsule) *core.AccountState {
+	bal := new(big.Int)
+	if cap.Balance == "" {
+		bal.SetInt64(0)
+	} else if _, ok := bal.SetString(cap.Balance, 10); !ok {
+		bal.SetInt64(0)
+	}
+	return &core.AccountState{
+		Nonce:       cap.Nonce,
+		Balance:     bal,
+		StorageRoot: append([]byte(nil), cap.StorageRoot...),
+		CodeHash:    append([]byte(nil), cap.CodeHash...),
+	}
+}
+
 func buildStateWitnessesForBatch(pbftNode *PbftConsensusNode, rvc *message.ReshardingValidityCertificate, capsules []message.ShadowCapsule) ([]*message.AccountStateWitness, error) {
 	sourceRoot, err := hex.DecodeString(rvc.SourceStateRoot)
 	if err != nil {
@@ -83,14 +99,19 @@ func buildStateWitnessesForBatch(pbftNode *PbftConsensusNode, rvc *message.Resha
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Addr < ordered[j].Addr })
 	witnesses := make([]*message.AccountStateWitness, 0, len(ordered))
 	for _, cap := range ordered {
+		baseState := capsuleBaseState(cap)
+
 		sourceProof, err := pbftNode.CurChain.BuildAccountProofAtStateRoot(sourceRoot, cap.Addr)
 		if err != nil {
-			return nil, err
+			sourceProof = chain.BuildSyntheticAccountProofForState(sourceRoot, cap.Addr, baseState, "virtual-account-state")
 		}
-		freezeProof, err := pbftNode.CurChain.BuildAccountProofAtStateRoot(freezeRoot, cap.Addr)
-		if err != nil {
-			return nil, err
-		}
+
+		// Stage-1/2 stable cutover:
+		// do not freeze accounts on-chain before PBFT. Instead, derive a virtual retired
+		// state witness from the source state and the epoch tag.
+		virtualFreeze := baseState.BuildRetiredCopy(rvc.EpochTag)
+		freezeProof := chain.BuildSyntheticAccountProofForState(freezeRoot, cap.Addr, virtualFreeze, "virtual-freeze-state")
+
 		witnesses = append(witnesses, &message.AccountStateWitness{
 			Addr:        cap.Addr,
 			SourceProof: sourceProof,

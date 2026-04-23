@@ -58,7 +58,14 @@ type PbftConsensusNode struct {
 
 	sequenceLock sync.Mutex
 	lock         sync.Mutex
-	taskForLock  sync.Mutex
+
+	// 兼容修复：
+	// messageHandle.go 仍然使用 askForLock。
+	// 这里恢复该字段，避免最新 pbft.go 与现有 messageHandle.go 接口不一致导致编译失败。
+	askForLock sync.Mutex
+
+	// 保留 taskForLock，避免其他分支/文件后续仍引用旧名字。
+	taskForLock sync.Mutex
 
 	seqIDMap   map[uint64]uint64
 	seqMapLock sync.Mutex

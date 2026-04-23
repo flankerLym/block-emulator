@@ -68,13 +68,14 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendAccounts_and_Txs() {
 		}
 	}
 	asFetched := cphm.pbftNode.CurChain.FetchAccounts(accountToFetch)
+
+	// 阶段一/二稳定版：
+	// 不再通过 MaterializeAccountsIfMissing / FreezeAccount 在 leader 本地偷偷推进空状态块。
+	// 迁移证明使用 source snapshot + synthetic freeze witness 完成，所有真正的链状态变更只在 partition PBFT commit 时发生。
 	if meta != nil && meta.Algorithm == "ZKSCAR" && len(accountToFetch) > 0 {
-		materialized := cphm.pbftNode.CurChain.MaterializeAccountsIfMissing(accountToFetch, asFetched)
-		if len(materialized) > 0 {
-			cphm.pbftNode.pl.Plog.Printf("ZK-SCAR broker: materialized %d source accounts before RVC proof generation\n", len(materialized))
-			asFetched = cphm.pbftNode.CurChain.FetchAccounts(accountToFetch)
-		}
+		cphm.pbftNode.pl.Plog.Printf("ZK-SCAR broker: using non-mutating source snapshot for %d accounts before RVC proof generation\n", len(accountToFetch))
 	}
+
 	cphm.pbftNode.CurChain.Txpool.GetLocked()
 	for i := uint64(0); i < cphm.pbftNode.pbftChainConfig.ShardNums; i++ {
 		if i == cphm.pbftNode.ShardID {
@@ -95,7 +96,6 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendAccounts_and_Txs() {
 				addrSet[addr] = true
 				if meta != nil && meta.Algorithm == "ZKSCAR" {
 					cphm.cdm.SourceCustodyState[addr] = baseState.Clone()
-					cphm.pbftNode.CurChain.FreezeAccount(addr, meta.EpochTag)
 					tmpl := templateCapsule(meta, addr)
 					debtRoot := debtRootForAddr(cphm.pbftNode.CurChain.Txpool.TxQueue, cphm.cdm, addr)
 					cap := message.ShadowCapsule{Addr: addr, CurrentShard: cphm.pbftNode.ShardID, TargetShard: i, Balance: baseState.Balance.String(), Nonce: baseState.Nonce, CodeHash: append([]byte(nil), baseState.CodeHash...), StorageRoot: append([]byte(nil), baseState.StorageRoot...), DebtRoot: debtRoot, EpochTag: meta.EpochTag}
@@ -149,7 +149,9 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendAccounts_and_Txs() {
 		cphm.pbftNode.CurChain.Txpool.TxQueue = cphm.pbftNode.CurChain.Txpool.TxQueue[:firstPtr]
 		if meta != nil && meta.Algorithm == "ZKSCAR" {
 			if len(shadowCapsules) > 0 {
-				freezeStateRoot := stateRootHex(cphm.pbftNode.CurChain.CurrentBlock.Header.StateRoot)
+				// freezeStateRoot no longer comes from a leader-only on-chain freeze step.
+				// use the same source root and let state_witness.go derive a virtual retired witness.
+				freezeStateRoot := sourceStateRoot
 				rvc := buildBatchRVC(cphm.pbftNode, meta.EpochTag, cphm.pbftNode.ShardID, i, shadowCapsules, sourceStateRoot, freezeStateRoot)
 				for _, cap := range shadowCapsules {
 					shadowState := cphm.cdm.SourceCustodyState[cap.Addr].BuildShadowState(meta.EpochTag, cphm.pbftNode.ShardID, i, cap.DebtRoot, rvc.CertificateID)
