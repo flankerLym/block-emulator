@@ -2,7 +2,6 @@ package chain
 
 import (
 	"blockEmulator/core"
-	"blockEmulator/message"
 	"log"
 	"math/big"
 	"sync"
@@ -12,9 +11,10 @@ import (
 )
 
 type shadowAccountEntry struct {
-	state      *core.AccountState
-	ownerShard uint64
-	epochTag   uint64
+	state       *core.AccountState
+	ownerShard  uint64
+	sourceShard uint64
+	epochTag    uint64
 }
 
 type shadowRuntime struct {
@@ -62,31 +62,51 @@ func cloneAccountState(as *core.AccountState) *core.AccountState {
 	}
 }
 
-func (bc *BlockChain) InstallShadowCapsule(capsule *message.ExecutionShadowCapsule) {
-	if capsule == nil {
-		return
-	}
+// InstallShadowCapsule installs the phase-1 executable shadow account on the
+// target shard. This is the ownership-first, state-light handoff entry.
+func (bc *BlockChain) InstallShadowCapsule(addr string, sourceShard, targetShard uint64, balance *big.Int, nonce uint64, codeHash, storageRoot []byte, epochTag uint64) {
 	rt := getShadowRuntime(bc)
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	rt.accounts[capsule.Addr] = &shadowAccountEntry{
+
+	rt.accounts[addr] = &shadowAccountEntry{
 		state: &core.AccountState{
-			Nonce:       capsule.Nonce,
-			Balance:     cloneBigInt(capsule.Balance),
-			StorageRoot: cloneBytes(capsule.StorageRoot),
-			CodeHash:    cloneBytes(capsule.CodeHash),
+			Nonce:       nonce,
+			Balance:     cloneBigInt(balance),
+			StorageRoot: cloneBytes(storageRoot),
+			CodeHash:    cloneBytes(codeHash),
 		},
-		ownerShard: capsule.TargetShard,
-		epochTag:   capsule.EpochTag,
+		ownerShard:  targetShard,
+		sourceShard: sourceShard,
+		epochTag:    epochTag,
 	}
+}
+
+// InstallOwnershipHandoff installs a source-side ownership overlay without
+// copying full state. It is used to block further local writes and to reroute
+// late arrivals to the new owner shard immediately after cutover.
+func (bc *BlockChain) InstallOwnershipHandoff(addr string, sourceShard, targetShard uint64, epochTag uint64) {
+	rt := getShadowRuntime(bc)
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+
+	entry, ok := rt.accounts[addr]
+	if !ok {
+		entry = &shadowAccountEntry{}
+		rt.accounts[addr] = entry
+	}
+	entry.ownerShard = targetShard
+	entry.sourceShard = sourceShard
+	entry.epochTag = epochTag
 }
 
 func (bc *BlockChain) GetShadowOwner(addr string) (uint64, bool) {
 	rt := getShadowRuntime(bc)
 	rt.mu.RLock()
 	defer rt.mu.RUnlock()
+
 	entry, ok := rt.accounts[addr]
-	if !ok {
+	if !ok || entry.ownerShard == 0 {
 		return 0, false
 	}
 	return entry.ownerShard, true
@@ -96,14 +116,15 @@ func (bc *BlockChain) GetShadowAccount(addr string) (*core.AccountState, bool) {
 	rt := getShadowRuntime(bc)
 	rt.mu.RLock()
 	defer rt.mu.RUnlock()
+
 	entry, ok := rt.accounts[addr]
-	if !ok {
+	if !ok || entry.state == nil {
 		return nil, false
 	}
 	return cloneAccountState(entry.state), true
 }
 
-func (bc *BlockChain) ClearShadowAccounts(addrs []string) {
+func (bc *BlockChain) RemoveShadowAccounts(addrs []string) {
 	rt := getShadowRuntime(bc)
 	rt.mu.Lock()
 	defer rt.mu.Unlock()

@@ -3,7 +3,9 @@ package pbft_all
 import (
 	"blockEmulator/chain"
 	"blockEmulator/consensus_shard/pbft_all/dataSupport"
+	"blockEmulator/core"
 	"blockEmulator/message"
+	"blockEmulator/networks"
 	"encoding/json"
 	"log"
 )
@@ -38,6 +40,30 @@ func (crom *CLPARelayOutsideModule) HandleMessageOutsidePBFT(msgType message.Mes
 	return true
 }
 
+func (crom *CLPARelayOutsideModule) desiredShardForInject(tx *core.Transaction) uint64 {
+	return crom.pbftNode.CurChain.Get_PartitionMap(tx.Sender)
+}
+
+func (crom *CLPARelayOutsideModule) desiredShardForRelay(tx *core.Transaction) uint64 {
+	return crom.pbftNode.CurChain.Get_PartitionMap(tx.Recipient)
+}
+
+func (crom *CLPARelayOutsideModule) forwardInjectBatch(toShard uint64, txs []*core.Transaction) {
+	if len(txs) == 0 {
+		return
+	}
+	it := message.InjectTxs{
+		Txs:       txs,
+		ToShardID: toShard,
+	}
+	itByte, err := json.Marshal(it)
+	if err != nil {
+		log.Panic(err)
+	}
+	sendMsg := message.MergeMessage(message.CInject, itByte)
+	go networks.TcpDial(sendMsg, crom.pbftNode.ip_nodeTable[toShard][0])
+}
+
 // receive relay transaction, which is for cross shard txs
 func (crom *CLPARelayOutsideModule) handleRelay(content []byte) {
 	relay := new(message.Relay)
@@ -46,7 +72,34 @@ func (crom *CLPARelayOutsideModule) handleRelay(content []byte) {
 		log.Panic(err)
 	}
 	crom.pbftNode.pl.Plog.Printf("S%dN%d : has received relay txs from shard %d, the senderSeq is %d\n", crom.pbftNode.ShardID, crom.pbftNode.NodeID, relay.SenderShardID, relay.SenderSeq)
-	crom.pbftNode.CurChain.Txpool.AddTxs2Pool(relay.Txs)
+
+	localTxs := make([]*core.Transaction, 0, len(relay.Txs))
+	forward := make(map[uint64][]*core.Transaction)
+	for _, tx := range relay.Txs {
+		target := crom.desiredShardForRelay(tx)
+		if target == crom.pbftNode.ShardID {
+			localTxs = append(localTxs, tx)
+		} else {
+			forward[target] = append(forward[target], tx)
+		}
+	}
+	if len(localTxs) > 0 {
+		crom.pbftNode.CurChain.Txpool.AddTxs2Pool(localTxs)
+	}
+	for sid, txs := range forward {
+		relayMsg := message.Relay{
+			Txs:           txs,
+			SenderShardID: relay.SenderShardID,
+			SenderSeq:     relay.SenderSeq,
+		}
+		rByte, err := json.Marshal(relayMsg)
+		if err != nil {
+			log.Panic(err)
+		}
+		sendMsg := message.MergeMessage(message.CRelay, rByte)
+		go networks.TcpDial(sendMsg, crom.pbftNode.ip_nodeTable[sid][0])
+	}
+
 	crom.pbftNode.seqMapLock.Lock()
 	crom.pbftNode.seqIDMap[relay.SenderShardID] = relay.SenderSeq
 	crom.pbftNode.seqMapLock.Unlock()
@@ -61,17 +114,44 @@ func (crom *CLPARelayOutsideModule) handleRelayWithProof(content []byte) {
 	}
 	crom.pbftNode.pl.Plog.Printf("S%dN%d : has received relay txs & proofs from shard %d, the senderSeq is %d\n", crom.pbftNode.ShardID, crom.pbftNode.NodeID, rwp.SenderShardID, rwp.SenderSeq)
 	// validate the proofs of txs
-	isAllCorrect := true
 	for i, tx := range rwp.Txs {
 		if ok, _ := chain.TxProofVerify(tx.TxHash, &rwp.TxProofs[i]); !ok {
-			isAllCorrect = false
-			break
+			crom.pbftNode.pl.Plog.Println("Err: wrong proof!")
+			return
 		}
 	}
-	if isAllCorrect {
-		crom.pbftNode.CurChain.Txpool.AddTxs2Pool(rwp.Txs)
-	} else {
-		crom.pbftNode.pl.Plog.Println("Err: wrong proof!")
+
+	localTxs := make([]*core.Transaction, 0, len(rwp.Txs))
+	localProofs := make([]chain.TxProofResult, 0, len(rwp.TxProofs))
+	forwardTxs := make(map[uint64][]*core.Transaction)
+	forwardProofs := make(map[uint64][]chain.TxProofResult)
+
+	for i, tx := range rwp.Txs {
+		target := crom.desiredShardForRelay(tx)
+		if target == crom.pbftNode.ShardID {
+			localTxs = append(localTxs, tx)
+			localProofs = append(localProofs, rwp.TxProofs[i])
+		} else {
+			forwardTxs[target] = append(forwardTxs[target], tx)
+			forwardProofs[target] = append(forwardProofs[target], rwp.TxProofs[i])
+		}
+	}
+	if len(localTxs) > 0 {
+		crom.pbftNode.CurChain.Txpool.AddTxs2Pool(localTxs)
+	}
+	for sid, txs := range forwardTxs {
+		msg := message.RelayWithProof{
+			Txs:           txs,
+			TxProofs:      forwardProofs[sid],
+			SenderShardID: rwp.SenderShardID,
+			SenderSeq:     rwp.SenderSeq,
+		}
+		rByte, err := json.Marshal(msg)
+		if err != nil {
+			log.Panic(err)
+		}
+		sendMsg := message.MergeMessage(message.CRelayWithProof, rByte)
+		go networks.TcpDial(sendMsg, crom.pbftNode.ip_nodeTable[sid][0])
 	}
 
 	crom.pbftNode.seqMapLock.Lock()
@@ -86,8 +166,24 @@ func (crom *CLPARelayOutsideModule) handleInjectTx(content []byte) {
 	if err != nil {
 		log.Panic(err)
 	}
-	crom.pbftNode.CurChain.Txpool.AddTxs2Pool(it.Txs)
-	crom.pbftNode.pl.Plog.Printf("S%dN%d : has handled injected txs msg, txs: %d \n", crom.pbftNode.ShardID, crom.pbftNode.NodeID, len(it.Txs))
+
+	localTxs := make([]*core.Transaction, 0, len(it.Txs))
+	forward := make(map[uint64][]*core.Transaction)
+	for _, tx := range it.Txs {
+		target := crom.desiredShardForInject(tx)
+		if target == crom.pbftNode.ShardID {
+			localTxs = append(localTxs, tx)
+		} else {
+			forward[target] = append(forward[target], tx)
+		}
+	}
+	if len(localTxs) > 0 {
+		crom.pbftNode.CurChain.Txpool.AddTxs2Pool(localTxs)
+	}
+	for sid, txs := range forward {
+		crom.forwardInjectBatch(sid, txs)
+	}
+	crom.pbftNode.pl.Plog.Printf("S%dN%d : handled injected txs msg, local=%d forwarded=%d \n", crom.pbftNode.ShardID, crom.pbftNode.NodeID, len(localTxs), len(it.Txs)-len(localTxs))
 }
 
 // the leader received the partition message from listener/decider,
@@ -140,15 +236,22 @@ func (crom *CLPARelayOutsideModule) handleAccountStateAndTxMsg(content []byte) {
 }
 
 func (crom *CLPARelayOutsideModule) handleShadowCapsule(content []byte) {
-	scb := new(message.ShadowCapsuleBatch)
-	if err := json.Unmarshal(content, scb); err != nil {
+	batch := new(message.ShadowCapsuleBatch)
+	err := json.Unmarshal(content, batch)
+	if err != nil {
 		log.Panic(err)
 	}
-	if scb.ToShard != crom.pbftNode.ShardID {
-		return
+	for _, capsule := range batch.Capsules {
+		crom.pbftNode.CurChain.InstallShadowCapsule(
+			capsule.Addr,
+			capsule.SourceShard,
+			capsule.TargetShard,
+			capsule.Balance,
+			capsule.Nonce,
+			capsule.CodeHash,
+			capsule.StorageRoot,
+			capsule.EpochTag,
+		)
 	}
-	for idx := range scb.Capsules {
-		crom.pbftNode.CurChain.InstallShadowCapsule(&scb.Capsules[idx])
-	}
-	crom.pbftNode.pl.Plog.Printf("S%dN%d installed %d shadow capsules for epoch %d\n", crom.pbftNode.ShardID, crom.pbftNode.NodeID, len(scb.Capsules), scb.EpochTag)
+	crom.pbftNode.pl.Plog.Printf("S%dN%d installed %d shadow capsules for epoch %d\n", crom.pbftNode.ShardID, crom.pbftNode.NodeID, len(batch.Capsules), batch.EpochTag)
 }

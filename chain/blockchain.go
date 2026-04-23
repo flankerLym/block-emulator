@@ -63,9 +63,9 @@ func (bc *BlockChain) Update_PartitionMap(key string, val uint64) {
 
 // Get parition (if not exist, return default)
 func (bc *BlockChain) Get_PartitionMap(key string) uint64 {
-	// Phase-1 ownership-first overlay: if a shadow capsule has already been
-	// installed locally, the shadow owner takes precedence before the official
-	// partition map is fully committed.
+	// Phase-1 ownership-first overlay: if a shadow capsule or a source-side
+	// cutover owner has already been installed locally, it takes precedence
+	// before the official partition map is fully committed.
 	if owner, ok := bc.GetShadowOwner(key); ok {
 		return owner
 	}
@@ -101,8 +101,8 @@ func (bc *BlockChain) GetUpdateStatusTrie(txs []*core.Transaction) common.Hash {
 			s_state_enc, _ := st.Get([]byte(tx.Sender))
 			var s_state *core.AccountState
 			if s_state_enc == nil {
-				// Phase-1 fast takeover: if the account has already been installed as a
-				// local shadow account, bootstrap execution from that capsule snapshot
+				// Phase-1 fast takeover: if the account has already been installed as
+				// a local shadow account, bootstrap execution from that capsule snapshot
 				// rather than fabricating a fresh Init_Balance account.
 				if shadowState, ok := bc.GetShadowAccount(tx.Sender); ok {
 					s_state = shadowState
@@ -437,8 +437,11 @@ func (bc *BlockChain) AddAccounts(ac []string, as []*core.AccountState, miner in
 				ib := new(big.Int)
 				ib.Add(ib, as[i].Balance)
 				new_state := &core.AccountState{
-					Balance: ib,
-					Nonce:   as[i].Nonce,
+					AcAddress:   as[i].AcAddress,
+					Balance:     ib,
+					Nonce:       as[i].Nonce,
+					StorageRoot: cloneBytes(as[i].StorageRoot),
+					CodeHash:    cloneBytes(as[i].CodeHash),
 				}
 				st.Update([]byte(addr), new_state.Encode())
 			}

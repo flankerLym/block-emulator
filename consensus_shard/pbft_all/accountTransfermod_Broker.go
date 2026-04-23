@@ -55,6 +55,51 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) getPartitionReady() bool {
 	return len(cphm.cdm.PartitionReady) == int(cphm.pbftNode.pbftChainConfig.ShardNums) && flag
 }
 
+func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) phaseEpochTag() uint64 {
+	return cphm.cdm.AccountTransferRound + 1
+}
+
+func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendShadowCapsules(accountToFetch []string, asFetched []*core.AccountState, modified map[string]uint64) {
+	epochTag := cphm.phaseEpochTag()
+	batches := make(map[uint64][]message.ExecutionShadowCapsule)
+
+	for idx, addr := range accountToFetch {
+		target := modified[addr]
+		as := asFetched[idx]
+
+		cphm.pbftNode.CurChain.InstallOwnershipHandoff(addr, cphm.pbftNode.ShardID, target, epochTag)
+
+		capsule := message.ExecutionShadowCapsule{
+			Addr:        addr,
+			SourceShard: cphm.pbftNode.ShardID,
+			TargetShard: target,
+			Balance:     as.Balance,
+			Nonce:       as.Nonce,
+			CodeHash:    as.CodeHash,
+			StorageRoot: as.StorageRoot,
+			EpochTag:    epochTag,
+		}
+		batches[target] = append(batches[target], capsule)
+	}
+
+	for sid, caps := range batches {
+		batch := message.ShadowCapsuleBatch{
+			FromShard: cphm.pbftNode.ShardID,
+			ToShard:   sid,
+			EpochTag:  epochTag,
+			Capsules:  caps,
+		}
+		bByte, err := json.Marshal(batch)
+		if err != nil {
+			log.Panic(err)
+		}
+		sendMsg := message.MergeMessage(message.CShadowCapsule, bByte)
+		for nid := uint64(0); nid < cphm.pbftNode.pbftChainConfig.Nodes_perShard; nid++ {
+			go networks.TcpDial(sendMsg, cphm.pbftNode.ip_nodeTable[sid][nid])
+		}
+	}
+}
+
 // send the transactions and the accountState to other leaders
 func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendAccounts_and_Txs() {
 	// generate accout transfer and txs message
@@ -67,7 +112,11 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendAccounts_and_Txs() {
 		}
 	}
 	asFetched := cphm.pbftNode.CurChain.FetchAccounts(accountToFetch)
-	// send the accounts to other shards
+
+	// phase-1 fast takeover
+	cphm.sendShadowCapsules(accountToFetch, asFetched, cphm.cdm.ModifiedMap[lastMapid])
+
+	// phase-2 later reconciliation
 	cphm.pbftNode.CurChain.Txpool.GetLocked()
 	for i := uint64(0); i < cphm.pbftNode.pbftChainConfig.ShardNums; i++ {
 		if i == cphm.pbftNode.ShardID {
@@ -76,43 +125,13 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendAccounts_and_Txs() {
 		addrSend := make([]string, 0)
 		addrSet := make(map[string]bool)
 		asSend := make([]*core.AccountState, 0)
-		capsules := make([]message.ExecutionShadowCapsule, 0)
 		for idx, addr := range accountToFetch {
 			if cphm.cdm.ModifiedMap[lastMapid][addr] == i {
 				addrSend = append(addrSend, addr)
 				addrSet[addr] = true
 				asSend = append(asSend, asFetched[idx])
-				capsules = append(capsules, message.ExecutionShadowCapsule{
-					Addr:        addr,
-					SourceShard: cphm.pbftNode.ShardID,
-					TargetShard: i,
-					Balance:     asFetched[idx].Balance,
-					Nonce:       asFetched[idx].Nonce,
-					CodeHash:    asFetched[idx].CodeHash,
-					StorageRoot: asFetched[idx].StorageRoot,
-					EpochTag:    uint64(lastMapid + 1),
-				})
 			}
 		}
-
-		if len(capsules) != 0 {
-			scb := message.ShadowCapsuleBatch{
-				FromShard: cphm.pbftNode.ShardID,
-				ToShard:   i,
-				EpochTag:  uint64(lastMapid + 1),
-				Capsules:  capsules,
-			}
-			scByte, err := json.Marshal(scb)
-			if err != nil {
-				log.Panic()
-			}
-			scMsg := message.MergeMessage(message.CShadowCapsule, scByte)
-			for nid := uint64(0); nid < cphm.pbftNode.pbftChainConfig.Nodes_perShard; nid++ {
-				networks.TcpDial(scMsg, cphm.pbftNode.ip_nodeTable[i][nid])
-			}
-			cphm.pbftNode.pl.Plog.Printf("Phase1 shadow capsules sent to shard %d, capsule count=%d\n", i, len(capsules))
-		}
-
 		// fetch transactions to it, after the transactions is fetched, delete it in the pool
 		txSend := make([]*core.Transaction, 0)
 		firstPtr := 0
@@ -231,24 +250,29 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) proposePartition() (bool, *m
 func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) accountTransfer_do(atm *message.AccountTransferMsg) {
 	// change the partition Map
 	cnt := 0
+	cleanupAddrs := make([]string, 0, len(atm.ModifiedMap))
 	for key, val := range atm.ModifiedMap {
 		cnt++
+		cleanupAddrs = append(cleanupAddrs, key)
 		cphm.pbftNode.CurChain.Update_PartitionMap(key, val)
 	}
 	cphm.pbftNode.pl.Plog.Printf("%d key-vals are updated\n", cnt)
 
-	addrsToAdd := make([]string, 0, len(atm.Addrs))
-	statesToAdd := make([]*core.AccountState, 0, len(atm.AccountState))
+	toAddrs := make([]string, 0, len(atm.Addrs))
+	toStates := make([]*core.AccountState, 0, len(atm.AccountState))
 	for idx, addr := range atm.Addrs {
-		if cphm.pbftNode.CurChain.HasAccountState(addr) {
+		if cphm.pbftNode.CurChain.Get_PartitionMap(addr) != cphm.pbftNode.ShardID {
 			continue
 		}
-		addrsToAdd = append(addrsToAdd, addr)
-		statesToAdd = append(statesToAdd, atm.AccountState[idx])
+		if cphm.pbftNode.CurChain.HasAccountState(addr) {
+			cphm.pbftNode.pl.Plog.Printf("preserve materialized local state for %s during phase-2 reconciliation\n", addr)
+			continue
+		}
+		toAddrs = append(toAddrs, addr)
+		toStates = append(toStates, atm.AccountState[idx])
 	}
-	cphm.pbftNode.pl.Plog.Printf("%d addrs to add after shadow reconciliation\n", len(addrsToAdd))
-	cphm.pbftNode.CurChain.AddAccounts(addrsToAdd, statesToAdd, cphm.pbftNode.view.Load())
-	cphm.pbftNode.CurChain.ClearShadowAccounts(atm.Addrs)
+	cphm.pbftNode.CurChain.AddAccounts(toAddrs, toStates, cphm.pbftNode.view.Load())
+	cphm.pbftNode.CurChain.RemoveShadowAccounts(cleanupAddrs)
 
 	if uint64(len(cphm.cdm.ModifiedMap)) != atm.ATid {
 		cphm.cdm.ModifiedMap = append(cphm.cdm.ModifiedMap, atm.ModifiedMap)

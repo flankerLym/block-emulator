@@ -20,8 +20,9 @@ type PartitionModifiedMap struct {
 	PartitionModified map[string]uint64
 }
 
-// AccountTransferMsg is the original CLPA commit payload.
-// In phase-1 we keep it for the full migration / reconciliation stage.
+// AccountTransferMsg is the phase-2 reconciliation payload.
+// Stage-1 shadow takeover can already hand ownership to the target shard,
+// while this message carries the later full-state completion.
 type AccountTransferMsg struct {
 	ModifiedMap  map[string]uint64
 	Addrs        []string
@@ -44,7 +45,7 @@ type AccountStateAndTx struct {
 
 // ExecutionShadowCapsule is the phase-1 execution capsule used for
 // ownership-first, state-light takeover. It intentionally carries only
-// the minimum executable account semantics.
+// the minimum executable account semantics needed by the target shard.
 type ExecutionShadowCapsule struct {
 	Addr        string
 	SourceShard uint64
@@ -56,8 +57,8 @@ type ExecutionShadowCapsule struct {
 	EpochTag    uint64
 }
 
-// ShadowCapsuleBatch is the transport unit sent from source shard to
-// every replica in target shard before the full account-transfer commit.
+// ShadowCapsuleBatch is the transport unit sent from the source shard to
+// every replica in the target shard before the phase-2 full migration commit.
 type ShadowCapsuleBatch struct {
 	FromShard uint64
 	ToShard   uint64

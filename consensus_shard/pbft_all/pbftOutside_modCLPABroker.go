@@ -2,7 +2,9 @@ package pbft_all
 
 import (
 	"blockEmulator/consensus_shard/pbft_all/dataSupport"
+	"blockEmulator/core"
 	"blockEmulator/message"
+	"blockEmulator/networks"
 	"encoding/json"
 	"log"
 )
@@ -49,14 +51,61 @@ func (cbom *CLPABrokerOutsideModule) handleSeqIDinfos(content []byte) {
 	cbom.pbftNode.pl.Plog.Printf("S%dN%d : has handled SeqIDinfo msg\n", cbom.pbftNode.ShardID, cbom.pbftNode.NodeID)
 }
 
+func (cbom *CLPABrokerOutsideModule) desiredShardForInject(tx *core.Transaction) uint64 {
+	if tx.RawTxHash != nil {
+		if tx.FinalRecipient == tx.Recipient {
+			return cbom.pbftNode.CurChain.Get_PartitionMap(tx.Recipient)
+		}
+		if tx.OriginalSender == tx.Sender {
+			return cbom.pbftNode.CurChain.Get_PartitionMap(tx.Sender)
+		}
+	}
+	if tx.SenderIsBroker {
+		return cbom.pbftNode.CurChain.Get_PartitionMap(tx.Recipient)
+	}
+	return cbom.pbftNode.CurChain.Get_PartitionMap(tx.Sender)
+}
+
+func (cbom *CLPABrokerOutsideModule) forwardInjectBatch(toShard uint64, txs []*core.Transaction) {
+	if len(txs) == 0 {
+		return
+	}
+	it := message.InjectTxs{
+		Txs:       txs,
+		ToShardID: toShard,
+	}
+	itByte, err := json.Marshal(it)
+	if err != nil {
+		log.Panic(err)
+	}
+	sendMsg := message.MergeMessage(message.CInject, itByte)
+	go networks.TcpDial(sendMsg, cbom.pbftNode.ip_nodeTable[toShard][0])
+}
+
 func (cbom *CLPABrokerOutsideModule) handleInjectTx(content []byte) {
 	it := new(message.InjectTxs)
 	err := json.Unmarshal(content, it)
 	if err != nil {
 		log.Panic(err)
 	}
-	cbom.pbftNode.CurChain.Txpool.AddTxs2Pool(it.Txs)
-	cbom.pbftNode.pl.Plog.Printf("S%dN%d : has handled injected txs msg, txs: %d \n", cbom.pbftNode.ShardID, cbom.pbftNode.NodeID, len(it.Txs))
+
+	localTxs := make([]*core.Transaction, 0, len(it.Txs))
+	forward := make(map[uint64][]*core.Transaction)
+	for _, tx := range it.Txs {
+		target := cbom.desiredShardForInject(tx)
+		if target == cbom.pbftNode.ShardID {
+			localTxs = append(localTxs, tx)
+		} else {
+			forward[target] = append(forward[target], tx)
+		}
+	}
+	if len(localTxs) > 0 {
+		cbom.pbftNode.CurChain.Txpool.AddTxs2Pool(localTxs)
+	}
+	for sid, txs := range forward {
+		cbom.forwardInjectBatch(sid, txs)
+	}
+	cbom.pbftNode.pl.Plog.Printf("S%dN%d : handled injected txs msg, local=%d forwarded=%d \n", cbom.pbftNode.ShardID, cbom.pbftNode.NodeID, len(localTxs), len(it.Txs)-len(localTxs))
 }
 
 // the leader received the partition message from listener/decider,
@@ -109,15 +158,22 @@ func (cbom *CLPABrokerOutsideModule) handleAccountStateAndTxMsg(content []byte) 
 }
 
 func (cbom *CLPABrokerOutsideModule) handleShadowCapsule(content []byte) {
-	scb := new(message.ShadowCapsuleBatch)
-	if err := json.Unmarshal(content, scb); err != nil {
+	batch := new(message.ShadowCapsuleBatch)
+	err := json.Unmarshal(content, batch)
+	if err != nil {
 		log.Panic(err)
 	}
-	if scb.ToShard != cbom.pbftNode.ShardID {
-		return
+	for _, capsule := range batch.Capsules {
+		cbom.pbftNode.CurChain.InstallShadowCapsule(
+			capsule.Addr,
+			capsule.SourceShard,
+			capsule.TargetShard,
+			capsule.Balance,
+			capsule.Nonce,
+			capsule.CodeHash,
+			capsule.StorageRoot,
+			capsule.EpochTag,
+		)
 	}
-	for idx := range scb.Capsules {
-		cbom.pbftNode.CurChain.InstallShadowCapsule(&scb.Capsules[idx])
-	}
-	cbom.pbftNode.pl.Plog.Printf("S%dN%d installed %d shadow capsules for epoch %d\n", cbom.pbftNode.ShardID, cbom.pbftNode.NodeID, len(scb.Capsules), scb.EpochTag)
+	cbom.pbftNode.pl.Plog.Printf("S%dN%d installed %d shadow capsules for epoch %d\n", cbom.pbftNode.ShardID, cbom.pbftNode.NodeID, len(batch.Capsules), batch.EpochTag)
 }
