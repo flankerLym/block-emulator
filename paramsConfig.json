@@ -22,7 +22,7 @@
   "ReconfigTimeGap": 50,
 
   "AdaptiveReconfigEnabled": 1,
-  "ReconfigScoreThreshold": 0.55,
+  "ReconfigScoreThreshold": 0.1,
   "ReconfigLoadWeight": 0.45,
   "ReconfigCrossWeight": 0.35,
   "ReconfigLatencyWeight": 0.20,
