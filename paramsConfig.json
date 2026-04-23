@@ -1,7 +1,7 @@
 {
   "ConsensusMethod": 0,
-  
-  "PbftViewChangeTimeOut":20000,
+
+  "PbftViewChangeTimeOut": 20000,
 
   "ExpDataRootDir": "expTest",
 
@@ -17,11 +17,21 @@
 
   "BrokerNum": 10,
   "RelayWithMerkleProof": 0,
-  
+
   "DatasetFile": "./selectedTxs_300K.csv",
   "ReconfigTimeGap": 50,
 
+  "AdaptiveReconfigEnabled": 1,
+  "ReconfigScoreThreshold": 0.55,
+  "ReconfigLoadWeight": 0.45,
+  "ReconfigCrossWeight": 0.35,
+  "ReconfigLatencyWeight": 0.20,
+  "MigrationBudget": 200,
+  "ReconfigMinImprovement": 0.02,
+  "ReconfigEMAAlpha": 0.35,
+  "ReconfigWarmupBlocks": 8,
+
   "Delay": -1,
   "JitterRange": -1,
-  "Bandwidth":10000000
+  "Bandwidth": 10000000
 }

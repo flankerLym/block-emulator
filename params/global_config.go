@@ -42,6 +42,16 @@ var (
 	DatasetFile    = `./selectedTxs_300K.csv` // The raw BlockTransaction data path
 
 	ReconfigTimeGap = 50 // The time gap between epochs. This variable is only used in CLPA / CLPA_Broker now.
+
+	AdaptiveReconfigEnabled = 0    // 1 enables ABR-Shard's adaptive trigger; 0 keeps fixed-interval behavior.
+	ReconfigScoreThreshold  = 0.55 // Trigger threshold of ABR-Shard.
+	ReconfigLoadWeight      = 0.45 // Weight of shard-load imbalance in the trigger score.
+	ReconfigCrossWeight     = 0.35 // Weight of cross-shard ratio in the trigger score.
+	ReconfigLatencyWeight   = 0.20 // Weight of block latency pressure in the trigger score.
+	MigrationBudget         = 200  // Maximum number of accounts moved in one reconfiguration round.
+	ReconfigMinImprovement  = 0.02 // If the previous improvement is below this ratio, the next trigger is suppressed.
+	ReconfigEMAAlpha        = 0.35 // EMA factor for runtime metrics.
+	ReconfigWarmupBlocks    = 8    // Minimum number of observed blocks before adaptive triggering starts.
 )
 
 // network layer
@@ -73,6 +83,16 @@ type globalConfig struct {
 	RelayWithMerkleProof int    `json:"RelayWithMerkleProof"`
 	DatasetFile          string `json:"DatasetFile"`
 	ReconfigTimeGap      int    `json:"ReconfigTimeGap"`
+
+	AdaptiveReconfigEnabled int     `json:"AdaptiveReconfigEnabled"`
+	ReconfigScoreThreshold  float64 `json:"ReconfigScoreThreshold"`
+	ReconfigLoadWeight      float64 `json:"ReconfigLoadWeight"`
+	ReconfigCrossWeight     float64 `json:"ReconfigCrossWeight"`
+	ReconfigLatencyWeight   float64 `json:"ReconfigLatencyWeight"`
+	MigrationBudget         int     `json:"MigrationBudget"`
+	ReconfigMinImprovement  float64 `json:"ReconfigMinImprovement"`
+	ReconfigEMAAlpha        float64 `json:"ReconfigEMAAlpha"`
+	ReconfigWarmupBlocks    int     `json:"ReconfigWarmupBlocks"`
 
 	Delay       int `json:"Delay"`
 	JitterRange int `json:"JitterRange"`
@@ -121,6 +141,32 @@ func ReadConfigFile() {
 	DatasetFile = config.DatasetFile
 
 	ReconfigTimeGap = config.ReconfigTimeGap
+
+	AdaptiveReconfigEnabled = config.AdaptiveReconfigEnabled
+	if config.ReconfigScoreThreshold > 0 {
+		ReconfigScoreThreshold = config.ReconfigScoreThreshold
+	}
+	if config.ReconfigLoadWeight > 0 {
+		ReconfigLoadWeight = config.ReconfigLoadWeight
+	}
+	if config.ReconfigCrossWeight > 0 {
+		ReconfigCrossWeight = config.ReconfigCrossWeight
+	}
+	if config.ReconfigLatencyWeight > 0 {
+		ReconfigLatencyWeight = config.ReconfigLatencyWeight
+	}
+	if config.MigrationBudget > 0 {
+		MigrationBudget = config.MigrationBudget
+	}
+	if config.ReconfigMinImprovement > 0 {
+		ReconfigMinImprovement = config.ReconfigMinImprovement
+	}
+	if config.ReconfigEMAAlpha > 0 && config.ReconfigEMAAlpha <= 1 {
+		ReconfigEMAAlpha = config.ReconfigEMAAlpha
+	}
+	if config.ReconfigWarmupBlocks > 0 {
+		ReconfigWarmupBlocks = config.ReconfigWarmupBlocks
+	}
 
 	// network params
 	Delay = config.Delay

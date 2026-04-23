@@ -36,6 +36,7 @@ type CLPACommitteeMod_Broker struct {
 	modifiedMap         map[string]uint64
 	clpaLastRunningTime time.Time
 	clpaFreq            int
+	adaptiveStats       *adaptiveReconfigStats
 
 	//broker related  attributes avatar
 	broker             *broker.Broker
@@ -68,6 +69,7 @@ func NewCLPACommitteeMod_Broker(Ip_nodeTable map[uint64]map[uint64]string, Ss *s
 		modifiedMap:         make(map[string]uint64),
 		clpaFreq:            clpaFrequency,
 		clpaLastRunningTime: time.Time{},
+		adaptiveStats:       newAdaptiveReconfigStats(),
 		brokerConfirm1Pool:  make(map[string]*message.Mag1Confirm),
 		brokerConfirm2Pool:  make(map[string]*message.Mag2Confirm),
 		brokerTxPool:        make([]*core.Transaction, 0),
@@ -100,6 +102,79 @@ func (ccm *CLPACommitteeMod_Broker) fetchModifiedMap(key string) uint64 {
 	} else {
 		return val
 	}
+}
+
+func (ccm *CLPACommitteeMod_Broker) tryReconfigure(clpaCnt *int) {
+	if params.ShardNum <= 1 || ccm.clpaLastRunningTime.IsZero() {
+		return
+	}
+	if time.Since(ccm.clpaLastRunningTime) < time.Duration(ccm.clpaFreq)*time.Second {
+		return
+	}
+
+	if params.AdaptiveReconfigEnabled != 0 {
+		decision := ccm.adaptiveStats.makeDecision()
+		if !decision.ShouldTrigger {
+			ccm.sl.Slog.Printf("ABR-Shard skip reconfiguration: %s\n", decision.Reason)
+			ccm.clpaLastRunningTime = time.Now()
+			return
+		}
+		ccm.sl.Slog.Printf("ABR-Shard accepts reconfiguration: %s\n", decision.Reason)
+	} else {
+		ccm.sl.Slog.Println("Fixed-interval reconfiguration triggered.")
+	}
+
+	ccm.clpaLock.Lock()
+	backupState := new(partition.CLPAState)
+	backupState.CopyCLPA(*ccm.clpaGraph)
+
+	ccm.clpaGraph.ComputeEdges2Shard()
+	beforeCross := ccm.clpaGraph.CrossShardEdgeNum
+	mmap, _ := ccm.clpaGraph.CLPA_Partition()
+	rawMoveCount := len(mmap)
+
+	if params.MigrationBudget > 0 {
+		mmap = limitPartitionByBudget(ccm.clpaGraph, mmap, ccm.fetchModifiedMap, params.MigrationBudget)
+	}
+	ccm.clpaGraph.ComputeEdges2Shard()
+	afterCross := ccm.clpaGraph.CrossShardEdgeNum
+
+	if rawMoveCount == 0 || len(mmap) == 0 {
+		ccm.adaptiveStats.LastImprovement = 0
+		ccm.clpaGraph = backupState
+		ccm.clpaLock.Unlock()
+		ccm.clpaLastRunningTime = time.Now()
+		ccm.sl.Slog.Printf("ABR-Shard produced no executable migration (raw=%d, selected=%d).\n", rawMoveCount, len(mmap))
+		return
+	}
+
+	improvement := 0.0
+	if beforeCross > 0 {
+		improvement = float64(beforeCross-afterCross) / float64(beforeCross)
+		if improvement < 0 {
+			improvement = 0
+		}
+	}
+	ccm.adaptiveStats.LastImprovement = improvement
+
+	*clpaCnt++
+	ccm.clpaMapSend(mmap)
+	for key, val := range mmap {
+		ccm.modifiedMap[key] = val
+	}
+	ccm.clpaReset()
+	ccm.clpaLock.Unlock()
+
+	ccm.sl.Slog.Printf(
+		"ABR-Shard migration selected=%d raw=%d budget=%d crossEdges:%d->%d improvement=%.4f\n",
+		len(mmap), rawMoveCount, params.MigrationBudget, beforeCross, afterCross, improvement,
+	)
+
+	for atomic.LoadInt32(&ccm.curEpoch) != int32(*clpaCnt) {
+		time.Sleep(time.Second)
+	}
+	ccm.clpaLastRunningTime = time.Now()
+	ccm.sl.Slog.Println("Next CLPA epoch begins. ")
 }
 
 func (ccm *CLPACommitteeMod_Broker) txSending(txlist []*core.Transaction) {
@@ -181,24 +256,7 @@ func (ccm *CLPACommitteeMod_Broker) MsgSendingControl() {
 			ccm.Ss.StopGap_Reset()
 		}
 
-		if params.ShardNum > 1 && !ccm.clpaLastRunningTime.IsZero() && time.Since(ccm.clpaLastRunningTime) >= time.Duration(ccm.clpaFreq)*time.Second {
-			ccm.clpaLock.Lock()
-			clpaCnt++
-			mmap, _ := ccm.clpaGraph.CLPA_Partition()
-
-			ccm.clpaMapSend(mmap)
-			for key, val := range mmap {
-				ccm.modifiedMap[key] = val
-			}
-			ccm.clpaReset()
-			ccm.clpaLock.Unlock()
-
-			for atomic.LoadInt32(&ccm.curEpoch) != int32(clpaCnt) {
-				time.Sleep(time.Second)
-			}
-			ccm.clpaLastRunningTime = time.Now()
-			ccm.sl.Slog.Println("Next CLPA epoch begins. ")
-		}
+		ccm.tryReconfigure(&clpaCnt)
 
 		if ccm.nowDataNum == ccm.dataTotalNum {
 			break
@@ -208,24 +266,7 @@ func (ccm *CLPACommitteeMod_Broker) MsgSendingControl() {
 	// all transactions are sent. keep sending partition message...
 	for !ccm.Ss.GapEnough() { // wait all txs to be handled
 		time.Sleep(time.Second)
-		if params.ShardNum > 1 && time.Since(ccm.clpaLastRunningTime) >= time.Duration(ccm.clpaFreq)*time.Second {
-			ccm.clpaLock.Lock()
-			clpaCnt++
-			mmap, _ := ccm.clpaGraph.CLPA_Partition()
-
-			ccm.clpaMapSend(mmap)
-			for key, val := range mmap {
-				ccm.modifiedMap[key] = val
-			}
-			ccm.clpaReset()
-			ccm.clpaLock.Unlock()
-
-			for atomic.LoadInt32(&ccm.curEpoch) != int32(clpaCnt) {
-				time.Sleep(time.Second)
-			}
-			ccm.clpaLastRunningTime = time.Now()
-			ccm.sl.Slog.Println("Next CLPA epoch begins. ")
-		}
+		ccm.tryReconfigure(&clpaCnt)
 	}
 }
 
@@ -262,6 +303,13 @@ func (ccm *CLPACommitteeMod_Broker) HandleBlockInfo(b *message.BlockInfoMsg) {
 	if b.BlockBodyLength == 0 {
 		return
 	}
+
+	latency := time.Duration(0)
+	if !b.CommitTime.IsZero() && !b.ProposeTime.IsZero() && b.CommitTime.After(b.ProposeTime) {
+		latency = b.CommitTime.Sub(b.ProposeTime)
+	}
+	crossCount := len(b.Relay1Txs) + len(b.Relay2Txs) + len(b.Broker1Txs) + len(b.Broker2Txs)
+	ccm.adaptiveStats.observeBlock(b.SenderShardID, b.BlockBodyLength, crossCount, latency)
 
 	// add createConfirm
 	txs := make([]*core.Transaction, 0)
