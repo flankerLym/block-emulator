@@ -113,7 +113,16 @@ func MergeMessage(msgType MessageType, content []byte) []byte {
 	return append(b, content...)
 }
 
+// WireHeaderLen returns the fixed byte length of the message type prefix.
+func WireHeaderLen() int {
+	return prefixMSGtypeLen
+}
+
 func SplitMessage(message []byte) (MessageType, []byte) {
+	if len(message) < prefixMSGtypeLen {
+		return MessageType(""), nil
+	}
+
 	msgTypeBytes := message[:prefixMSGtypeLen]
 	msgTypePruned := make([]byte, 0)
 	for _, v := range msgTypeBytes {

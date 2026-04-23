@@ -11,6 +11,7 @@ import (
 	"blockEmulator/params"
 	"blockEmulator/shard"
 	"bufio"
+	"bytes"
 	"io"
 	"log"
 	"net"
@@ -24,66 +25,53 @@ import (
 )
 
 type PbftConsensusNode struct {
-	// the local config about pbft
-	RunningNode *shard.Node // the node information
-	ShardID     uint64      // denote the ID of the shard (or pbft), only one pbft consensus in a shard
-	NodeID      uint64      // denote the ID of the node in the pbft (shard)
+	RunningNode *shard.Node
+	ShardID     uint64
+	NodeID      uint64
 
-	// the data structure for blockchain
-	CurChain *chain.BlockChain // all node in the shard maintain the same blockchain
-	db       ethdb.Database    // to save the mpt
+	CurChain *chain.BlockChain
+	db       ethdb.Database
 
-	// the global config about pbft
-	pbftChainConfig *params.ChainConfig          // the chain config in this pbft
-	ip_nodeTable    map[uint64]map[uint64]string // denote the ip of the specific node
-	node_nums       uint64                       // the number of nodes in this pfbt, denoted by N
-	malicious_nums  uint64                       // f, 3f + 1 = N
+	pbftChainConfig *params.ChainConfig
+	ip_nodeTable    map[uint64]map[uint64]string
+	node_nums       uint64
+	malicious_nums  uint64
 
-	// view change
-	view           atomic.Int32 // denote the view of this pbft, the main node can be inferred from this variant
-	lastCommitTime atomic.Int64 // the time since last commit.
+	view           atomic.Int32
+	lastCommitTime atomic.Int64
 	viewChangeMap  map[ViewChangeData]map[uint64]bool
 	newViewMap     map[ViewChangeData]map[uint64]bool
 
-	// the control message and message checking utils in pbft
-	sequenceID        uint64                          // the message sequence id of the pbft
-	stopSignal        atomic.Bool                     // send stop signal
-	pStop             chan uint64                     // channle for stopping consensus
-	requestPool       map[string]*message.Request     // RequestHash to Request
-	cntPrepareConfirm map[string]map[*shard.Node]bool // count the prepare confirm message, [messageHash][Node]bool
-	cntCommitConfirm  map[string]map[*shard.Node]bool // count the commit confirm message, [messageHash][Node]bool
-	isCommitBordcast  map[string]bool                 // denote whether the commit is broadcast
-	isReply           map[string]bool                 // denote whether the message is reply
-	height2Digest     map[uint64]string               // sequence (block height) -> request, fast read
+	sequenceID        uint64
+	stopSignal        atomic.Bool
+	pStop             chan uint64
+	requestPool       map[string]*message.Request
+	cntPrepareConfirm map[string]map[*shard.Node]bool
+	cntCommitConfirm  map[string]map[*shard.Node]bool
+	isCommitBordcast  map[string]bool
+	isReply           map[string]bool
+	height2Digest     map[uint64]string
 
-	// pbft stage wait
-	pbftStage              atomic.Int32 // 1->Preprepare, 2->Prepare, 3->Commit, 4->Done
+	pbftStage              atomic.Int32
 	pbftLock               sync.Mutex
 	conditionalVarpbftLock sync.Cond
 
-	// locks about pbft
-	sequenceLock sync.Mutex // the lock of sequence
-	lock         sync.Mutex // lock the stage
-	askForLock   sync.Mutex // lock for asking for a serise of requests
+	sequenceLock sync.Mutex
+	lock         sync.Mutex
+	taskForLock  sync.Mutex
 
-	// seqID of other Shards, to synchronize
 	seqIDMap   map[uint64]uint64
 	seqMapLock sync.Mutex
 
-	// logger
 	pl *pbft_log.PbftLog
-	// tcp control
+
 	tcpln       net.Listener
 	tcpPoolLock sync.Mutex
 
-	// to handle the message in the pbft
 	ihm ExtraOpInConsensus
-
-	// to handle the message outside of pbft
 	ohm OpInterShards
 }
 
-// generate a pbft consensus for a node
 func NewPbftNode(shardID, nodeID uint64, pcc *params.ChainConfig, messageHandleType string) *PbftConsensusNode {
 	p := new(PbftConsensusNode)
 	p.ip_nodeTable = params.IPmap_nodeTable
@@ -119,7 +107,6 @@ func NewPbftNode(shardID, nodeID uint64, pcc *params.ChainConfig, messageHandleT
 	p.height2Digest = make(map[uint64]string)
 	p.malicious_nums = (p.node_nums - 1) / 3
 
-	// init view & last commit time
 	p.view.Store(0)
 	p.lastCommitTime.Store(time.Now().Add(time.Second * 5).UnixMilli())
 	p.viewChangeMap = make(map[ViewChangeData]map[uint64]bool)
@@ -129,7 +116,6 @@ func NewPbftNode(shardID, nodeID uint64, pcc *params.ChainConfig, messageHandleT
 
 	p.pl = pbft_log.NewPbftLog(shardID, nodeID)
 
-	// choose how to handle the messages in pbft or beyond pbft
 	switch string(messageHandleType) {
 	case "CLPA_Broker":
 		ncdm := dataSupport.NewCLPADataSupport()
@@ -167,26 +153,42 @@ func NewPbftNode(shardID, nodeID uint64, pcc *params.ChainConfig, messageHandleT
 		}
 	}
 
-	// set pbft stage now
 	p.conditionalVarpbftLock = *sync.NewCond(&p.pbftLock)
 	p.pbftStage.Store(1)
 
 	return p
 }
 
-// handle the raw message, send it to corresponded interfaces
+func normalizeWireFrame(msg []byte) []byte {
+	msg = bytes.TrimRight(msg, "\r\n")
+	if len(msg) == 0 {
+		return nil
+	}
+	return msg
+}
+
 func (p *PbftConsensusNode) handleMessage(msg []byte) {
+	msg = normalizeWireFrame(msg)
+	if len(msg) == 0 {
+		return
+	}
+	if len(msg) < message.WireHeaderLen() {
+		p.pl.Plog.Printf("S%dN%d : dropped malformed short frame, len=%d\n", p.ShardID, p.NodeID, len(msg))
+		return
+	}
+
 	msgType, content := message.SplitMessage(msg)
+	if msgType == message.MessageType("") {
+		p.pl.Plog.Printf("S%dN%d : dropped malformed frame with empty message type, len=%d\n", p.ShardID, p.NodeID, len(msg))
+		return
+	}
+
 	switch msgType {
-	// pbft inside message type
 	case message.CPrePrepare:
-		// use "go" to start a go routine to handle this message, so that a pre-arrival message will not be aborted.
 		go p.handlePrePrepare(content)
 	case message.CPrepare:
-		// use "go" to start a go routine to handle this message, so that a pre-arrival message will not be aborted.
 		go p.handlePrepare(content)
 	case message.CCommit:
-		// use "go" to start a go routine to handle this message, so that a pre-arrival message will not be aborted.
 		go p.handleCommit(content)
 
 	case message.ViewChangePropose:
@@ -202,7 +204,6 @@ func (p *PbftConsensusNode) handleMessage(msg []byte) {
 	case message.CStop:
 		p.WaitToStop()
 
-	// handle the message from outside
 	default:
 		go p.ohm.HandleMessageOutsidePBFT(msgType, content)
 	}
@@ -218,11 +219,14 @@ func (p *PbftConsensusNode) handleClientRequest(con net.Conn) {
 		}
 		switch err {
 		case nil:
+			frame := normalizeWireFrame(clientRequest)
+			if len(frame) == 0 {
+				continue
+			}
 			p.tcpPoolLock.Lock()
-			p.handleMessage(clientRequest)
+			p.handleMessage(frame)
 			p.tcpPoolLock.Unlock()
 		case io.EOF:
-			log.Println("client closed the connection by terminating the process")
 			return
 		default:
 			log.Printf("error: %v\n", err)
@@ -231,7 +235,6 @@ func (p *PbftConsensusNode) handleClientRequest(con net.Conn) {
 	}
 }
 
-// A consensus node starts tcp-listen.
 func (p *PbftConsensusNode) TcpListen() {
 	ln, err := net.Listen("tcp", p.RunningNode.IPaddr)
 	p.tcpln = ln
@@ -247,7 +250,6 @@ func (p *PbftConsensusNode) TcpListen() {
 	}
 }
 
-// When receiving a stop message, this node try to stop.
 func (p *PbftConsensusNode) WaitToStop() {
 	p.pl.Plog.Println("handling stop message")
 	p.stopSignal.Store(true)
@@ -258,7 +260,6 @@ func (p *PbftConsensusNode) WaitToStop() {
 	p.pStop <- 1
 }
 
-// close the pbft
 func (p *PbftConsensusNode) closePbft() {
 	p.CurChain.CloseBlockChain()
 }
