@@ -77,20 +77,22 @@ func (ccm *CLPACommitteeModule) tryReconfigure(clpaCnt *int) {
 	if params.ShardNum <= 1 || ccm.clpaLastRunningTime.IsZero() {
 		return
 	}
-	if time.Since(ccm.clpaLastRunningTime) < time.Duration(ccm.clpaFreq)*time.Second {
+
+	interval := effectiveReconfigInterval(ccm.clpaFreq)
+	if time.Since(ccm.clpaLastRunningTime) < interval {
 		return
 	}
 
 	if params.AdaptiveReconfigEnabled != 0 {
-		decision := ccm.adaptiveStats.makeDecision()
+		decision := ccm.adaptiveStats.makeDecision(ccm.clpaGraph)
 		if !decision.ShouldTrigger {
-			ccm.sl.Slog.Printf("ABR-Shard skip reconfiguration: %s\n", decision.Reason)
+			ccm.sl.Slog.Printf("ABR-Shard skip reconfiguration: interval=%s %s\n", interval.String(), decision.Reason)
 			ccm.clpaLastRunningTime = time.Now()
 			return
 		}
-		ccm.sl.Slog.Printf("ABR-Shard accepts reconfiguration: %s\n", decision.Reason)
+		ccm.sl.Slog.Printf("ABR-Shard accepts reconfiguration: interval=%s %s\n", interval.String(), decision.Reason)
 	} else {
-		ccm.sl.Slog.Println("Fixed-interval reconfiguration triggered.")
+		ccm.sl.Slog.Printf("Fixed-interval reconfiguration triggered (interval=%s).\n", interval.String())
 	}
 
 	ccm.clpaLock.Lock()
@@ -113,7 +115,7 @@ func (ccm *CLPACommitteeModule) tryReconfigure(clpaCnt *int) {
 		ccm.clpaGraph = backupState
 		ccm.clpaLock.Unlock()
 		ccm.clpaLastRunningTime = time.Now()
-		ccm.sl.Slog.Printf("ABR-Shard produced no executable migration (raw=%d, selected=%d).\n", rawMoveCount, len(mmap))
+		ccm.sl.Slog.Printf("ABR-Shard produced no executable migration (raw=%d, selected=%d, interval=%s).\n", rawMoveCount, len(mmap), interval.String())
 		return
 	}
 
@@ -126,7 +128,7 @@ func (ccm *CLPACommitteeModule) tryReconfigure(clpaCnt *int) {
 	}
 	ccm.adaptiveStats.LastImprovement = improvement
 
-	*clpaCnt++
+	(*clpaCnt)++
 	ccm.clpaMapSend(mmap)
 	for key, val := range mmap {
 		ccm.modifiedMap[key] = val
@@ -134,9 +136,11 @@ func (ccm *CLPACommitteeModule) tryReconfigure(clpaCnt *int) {
 	ccm.clpaReset()
 	ccm.clpaLock.Unlock()
 
+	ccm.adaptiveStats.resetWindow()
+
 	ccm.sl.Slog.Printf(
-		"ABR-Shard migration selected=%d raw=%d budget=%d crossEdges:%d->%d improvement=%.4f\n",
-		len(mmap), rawMoveCount, params.MigrationBudget, beforeCross, afterCross, improvement,
+		"ABR-Shard migration selected=%d raw=%d budget=%d crossEdges:%d->%d improvement=%.4f interval=%s\n",
+		len(mmap), rawMoveCount, params.MigrationBudget, beforeCross, afterCross, improvement, interval.String(),
 	)
 
 	for atomic.LoadInt32(&ccm.curEpoch) != int32(*clpaCnt) {
@@ -162,8 +166,8 @@ func (ccm *CLPACommitteeModule) txSending(txlist []*core.Transaction) {
 				if err != nil {
 					log.Panic(err)
 				}
-				send_msg := message.MergeMessage(message.CInject, itByte)
-				go networks.TcpDial(send_msg, ccm.IpNodeTable[sid][0])
+				sendMsg := message.MergeMessage(message.CInject, itByte)
+				go networks.TcpDial(sendMsg, ccm.IpNodeTable[sid][0])
 			}
 			sendToShard = make(map[uint64][]*core.Transaction)
 			time.Sleep(time.Second)
@@ -237,10 +241,10 @@ func (ccm *CLPACommitteeModule) clpaMapSend(m map[string]uint64) {
 	if err != nil {
 		log.Panic()
 	}
-	send_msg := message.MergeMessage(message.CPartitionMsg, pmByte)
+	sendMsg := message.MergeMessage(message.CPartitionMsg, pmByte)
 	// send to worker shards
 	for i := uint64(0); i < uint64(params.ShardNum); i++ {
-		go networks.TcpDial(send_msg, ccm.IpNodeTable[i][0])
+		go networks.TcpDial(sendMsg, ccm.IpNodeTable[i][0])
 	}
 	ccm.sl.Slog.Println("Supervisor: all partition map message has been sent. ")
 }

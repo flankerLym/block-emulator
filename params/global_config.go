@@ -43,15 +43,24 @@ var (
 
 	ReconfigTimeGap = 50 // The time gap between epochs. This variable is only used in CLPA / CLPA_Broker now.
 
-	AdaptiveReconfigEnabled = 0    // 1 enables ABR-Shard's adaptive trigger; 0 keeps fixed-interval behavior.
-	ReconfigScoreThreshold  = 0.55 // Trigger threshold of ABR-Shard.
-	ReconfigLoadWeight      = 0.45 // Weight of shard-load imbalance in the trigger score.
-	ReconfigCrossWeight     = 0.35 // Weight of cross-shard ratio in the trigger score.
-	ReconfigLatencyWeight   = 0.20 // Weight of block latency pressure in the trigger score.
-	MigrationBudget         = 200  // Maximum number of accounts moved in one reconfiguration round.
-	ReconfigMinImprovement  = 0.02 // If the previous improvement is below this ratio, the next trigger is suppressed.
-	ReconfigEMAAlpha        = 0.35 // EMA factor for runtime metrics.
-	ReconfigWarmupBlocks    = 8    // Minimum number of observed blocks before adaptive triggering starts.
+	AdaptiveReconfigEnabled       = 0    // 1 enables ABR-Shard's adaptive trigger; 0 keeps fixed-interval behavior.
+	ReconfigScoreThreshold        = 0.10 // Trigger threshold of ABR-Shard.
+	ReconfigLoadWeight            = 0.30 // Weight of shard-load imbalance in the trigger score.
+	ReconfigCrossWeight           = 0.50 // Weight of cross-shard pressure in the trigger score.
+	ReconfigLatencyWeight         = 0.20 // Weight of block latency pressure in the trigger score.
+	MigrationBudget               = 200  // Maximum number of accounts moved in one reconfiguration round.
+	ReconfigMinImprovement        = 0.02 // If the previous improvement is below this ratio, the next trigger is suppressed.
+	ReconfigEMAAlpha              = 0.35 // EMA factor for runtime metrics.
+	ReconfigWarmupBlocks          = 8    // Minimum number of observed blocks before adaptive triggering starts.
+	ReconfigIntervalFactor        = 0.60 // Moderate increase of checking frequency: 50s -> 30s when ReconfigTimeGap=50.
+	ReconfigMinIntervalSec        = 20   // Lower bound of the effective reconfiguration check interval.
+	ReconfigMinWindowTx           = 4000 // Minimum number of newly observed txs before a reconfiguration decision is allowed.
+	MigrationLocalityWeight       = 0.20 // Residual locality preference in migration ranking.
+	MigrationHotnessWeight        = 0.15 // Standalone hotness reward in migration ranking.
+	MigrationCrossWeight          = 1.60 // Explicit reward for reducing cross-shard edges.
+	MigrationHotCrossWeight       = 0.80 // Extra reward when a hot account also reduces cross-shard edges.
+	MigrationBalancePenaltyWeight = 0.25 // Penalty of moving into an overloaded shard.
+	MigrationStabilityBias        = 0.05 // Small stability bonus/penalty to avoid noisy moves.
 )
 
 // network layer
@@ -84,15 +93,24 @@ type globalConfig struct {
 	DatasetFile          string `json:"DatasetFile"`
 	ReconfigTimeGap      int    `json:"ReconfigTimeGap"`
 
-	AdaptiveReconfigEnabled int     `json:"AdaptiveReconfigEnabled"`
-	ReconfigScoreThreshold  float64 `json:"ReconfigScoreThreshold"`
-	ReconfigLoadWeight      float64 `json:"ReconfigLoadWeight"`
-	ReconfigCrossWeight     float64 `json:"ReconfigCrossWeight"`
-	ReconfigLatencyWeight   float64 `json:"ReconfigLatencyWeight"`
-	MigrationBudget         int     `json:"MigrationBudget"`
-	ReconfigMinImprovement  float64 `json:"ReconfigMinImprovement"`
-	ReconfigEMAAlpha        float64 `json:"ReconfigEMAAlpha"`
-	ReconfigWarmupBlocks    int     `json:"ReconfigWarmupBlocks"`
+	AdaptiveReconfigEnabled       int     `json:"AdaptiveReconfigEnabled"`
+	ReconfigScoreThreshold        float64 `json:"ReconfigScoreThreshold"`
+	ReconfigLoadWeight            float64 `json:"ReconfigLoadWeight"`
+	ReconfigCrossWeight           float64 `json:"ReconfigCrossWeight"`
+	ReconfigLatencyWeight         float64 `json:"ReconfigLatencyWeight"`
+	MigrationBudget               int     `json:"MigrationBudget"`
+	ReconfigMinImprovement        float64 `json:"ReconfigMinImprovement"`
+	ReconfigEMAAlpha              float64 `json:"ReconfigEMAAlpha"`
+	ReconfigWarmupBlocks          int     `json:"ReconfigWarmupBlocks"`
+	ReconfigIntervalFactor        float64 `json:"ReconfigIntervalFactor"`
+	ReconfigMinIntervalSec        int     `json:"ReconfigMinIntervalSec"`
+	ReconfigMinWindowTx           int     `json:"ReconfigMinWindowTx"`
+	MigrationLocalityWeight       float64 `json:"MigrationLocalityWeight"`
+	MigrationHotnessWeight        float64 `json:"MigrationHotnessWeight"`
+	MigrationCrossWeight          float64 `json:"MigrationCrossWeight"`
+	MigrationHotCrossWeight       float64 `json:"MigrationHotCrossWeight"`
+	MigrationBalancePenaltyWeight float64 `json:"MigrationBalancePenaltyWeight"`
+	MigrationStabilityBias        float64 `json:"MigrationStabilityBias"`
 
 	Delay       int `json:"Delay"`
 	JitterRange int `json:"JitterRange"`
@@ -166,6 +184,33 @@ func ReadConfigFile() {
 	}
 	if config.ReconfigWarmupBlocks > 0 {
 		ReconfigWarmupBlocks = config.ReconfigWarmupBlocks
+	}
+	if config.ReconfigIntervalFactor > 0 {
+		ReconfigIntervalFactor = config.ReconfigIntervalFactor
+	}
+	if config.ReconfigMinIntervalSec > 0 {
+		ReconfigMinIntervalSec = config.ReconfigMinIntervalSec
+	}
+	if config.ReconfigMinWindowTx > 0 {
+		ReconfigMinWindowTx = config.ReconfigMinWindowTx
+	}
+	if config.MigrationLocalityWeight > 0 {
+		MigrationLocalityWeight = config.MigrationLocalityWeight
+	}
+	if config.MigrationHotnessWeight > 0 {
+		MigrationHotnessWeight = config.MigrationHotnessWeight
+	}
+	if config.MigrationCrossWeight > 0 {
+		MigrationCrossWeight = config.MigrationCrossWeight
+	}
+	if config.MigrationHotCrossWeight > 0 {
+		MigrationHotCrossWeight = config.MigrationHotCrossWeight
+	}
+	if config.MigrationBalancePenaltyWeight > 0 {
+		MigrationBalancePenaltyWeight = config.MigrationBalancePenaltyWeight
+	}
+	if config.MigrationStabilityBias > 0 {
+		MigrationStabilityBias = config.MigrationStabilityBias
 	}
 
 	// network params
