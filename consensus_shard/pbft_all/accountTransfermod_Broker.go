@@ -153,6 +153,16 @@ func (cphm *CLPAPbftInsideExtraHandleMod_forBroker) sendAccounts_and_Txs() {
 				// use the same source root and let state_witness.go derive a virtual retired witness.
 				freezeStateRoot := sourceStateRoot
 				rvc := buildBatchRVC(cphm.pbftNode, meta.EpochTag, cphm.pbftNode.ShardID, i, shadowCapsules, sourceStateRoot, freezeStateRoot)
+
+				// Critical fix:
+				// every shadow capsule in this batch must carry the same RVCID as the
+				// generated certificate, otherwise later validation/grouping by RVCID
+				// fails even though shadow states and receipts already bind to the
+				// certificate correctly.
+				for idx := range shadowCapsules {
+					shadowCapsules[idx].RVCID = rvc.CertificateID
+				}
+
 				for _, cap := range shadowCapsules {
 					shadowState := cphm.cdm.SourceCustodyState[cap.Addr].BuildShadowState(meta.EpochTag, cphm.pbftNode.ShardID, i, cap.DebtRoot, rvc.CertificateID)
 					asSend = append(asSend, shadowState)
